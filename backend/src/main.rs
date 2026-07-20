@@ -1,6 +1,7 @@
 mod auth;
 mod config;
 mod db;
+mod email;
 mod redis;
 mod routes;
 mod state;
