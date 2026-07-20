@@ -63,6 +63,14 @@ impl RedisClient {
     }
 
     #[allow(dead_code)]
+    pub async fn pubsub(&self) -> Result<::redis::aio::PubSub, RedisError> {
+        self.client
+            .get_async_pubsub()
+            .await
+            .map_err(RedisError::Command)
+    }
+
+    #[allow(dead_code)]
     pub async fn publish(&self, channel: &str, payload: &str) -> Result<u64, RedisError> {
         let mut connection = self.client.get_multiplexed_async_connection().await?;
         let subscribers = connection.publish(channel, payload).await?;

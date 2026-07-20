@@ -1074,6 +1074,7 @@ dependencies = [
  "axum",
  "chrono",
  "dotenvy",
+ "futures-util",
  "hex",
  "jsonwebtoken",
  "rand 0.8.7",
