@@ -3,6 +3,7 @@ mod db;
 mod redis;
 mod routes;
 mod state;
+mod users;
 mod ws;
 
 use axum::Router;
