@@ -1,0 +1,37 @@
+MarketLens architecture plan
+
+Product direction
+- Build MarketLens as a Rust Axum API/WebSocket backend plus React SPA frontend.
+- Use PostgreSQL as the durable system of record and Redis for cache, pub/sub fan-out, and worker coordination.
+- Keep a shared retro-neon visual language across the app shell, charts, dashboards, and high-density financial panels.
+
+Repository and module structure
+- backend/: Axum application with modules for config, database, Redis, auth, users, instruments, market_data, analytics, fundamentals, watchlists, alerts, news, estimator, websocket, workers, and email.
+- backend/migrations/: ordered SQL migrations managed by the baseline migration framework.
+- backend/src/shared/: DTOs, API response envelopes, pagination, timeframe types, instrument identifiers, and WebSocket protocol messages shared internally by HTTP, worker, and WebSocket modules.
+- frontend/: React SPA with app shell, routing, auth/session store, API client, WebSocket client, shared theme tokens, chart components, dashboard panels, search/filter sidebar, watchlists, alerts, news, fundamentals, and estimator reports.
+- frontend/src/types/: TypeScript mirrors of public API DTOs and WebSocket messages. Generate or hand-maintain these from backend contracts until a codegen step is introduced.
+- docs/: lightweight implementation notes for provider adapters, data conventions, and deployment/runtime configuration if they become useful during later issues.
+
+Issue dependency map
+- Foundation: #1 scaffolds backend/frontend, #2 PostgreSQL and migrations, #3 Redis conventions, #4 WebSocket skeleton, #5 theme/app shell.
+- Auth: #6 user model feeds #7 JWT auth, #8 email verification, #9 middleware/refresh, and #10 frontend session UX.
+- Market data realtime path: #11 provider abstraction, #12 price-series storage/cache, #13 ingestion worker publishing, #14 WebSocket subscription/fan-out, #15 frontend realtime client.
+- Discovery: #16 instrument model, #17 search API, #18 filtering API, #19 sidebar UI, #20 view history, #21 popularity aggregation, #22 dashboard panels.
+- Charts and indicators: #23 timeframe API, #24 overlay chart, #25 candlestick/line toggle, #26 neon styling and overlay framework, #27 technical indicators, #28 multi-select picker.
+- Fundamentals and analytics: #29 fundamentals fetch/model, #30 API/panel, #31 cross-asset compute, #32 analytics panel.
+- User workflows: #33 watchlist model/API, #34 watchlist UI, #35 alert rule API, #36 realtime alert evaluation, #37 in-app/email delivery, #38 alerts UI.
+- Content and estimator: #39 news provider/article model, #40 news panel, #41 estimator composite service, #42 report persistence/API, #43 report UI.
+- Hardening: #44 reconnection/error review, #45 accessibility/contrast, #46 end-to-end test, #47 deployment preparation.
+
+Key design decisions
+- Axum should expose versioned JSON APIs under /api/v1 and WebSocket endpoints under /ws, with typed extractors for auth and shared error handling.
+- The backend should read public origin information from X-Forwarded-Host/X-Forwarded-Proto or ALLOWED_CORS_ORIGIN when validating CORS or WebSocket origins.
+- Migrations should be append-only and own schema creation for users, instruments, price series, fundamentals, watchlists, alerts, news, estimator reports, and audit/history tables.
+- Redis channel names should be stable and namespaced, for example marketlens:prices:{instrument}, marketlens:alerts, and marketlens:ingestion:status.
+- Provider integrations should sit behind traits/interfaces so later issues can swap mock, free, paid, or test providers without disturbing API handlers.
+- The WebSocket protocol should use explicit message envelopes with type, request id, subscription id, and payload fields to support reconnection, unsubscribe, and error events.
+- The frontend should centralize HTTP and WebSocket clients, session handling, and typed API responses instead of duplicating fetch logic in components.
+- Charts should use a single data adapter layer for historical API responses and realtime ticks so indicators, overlays, and multi-series views share one model.
+- Alerts should be evaluated server-side from the realtime stream, persisted with delivery state, and surfaced through both WebSocket events and queryable history.
+- End-to-end tests should cover the critical path: register/login, search instrument, subscribe to realtime updates, view chart/dashboard, create watchlist, create alert, and render estimator/news panels with mocked providers.
