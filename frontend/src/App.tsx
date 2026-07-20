@@ -1,54 +1,78 @@
 import './App.css';
+import { AppShell } from './components/AppShell';
+import { Panel } from './components/Panel';
 
-const tickers = [
-  { symbol: 'NVDA', name: 'NVIDIA Corp.', price: '$127.44', change: '+2.18%' },
-  { symbol: 'BTC', name: 'Bitcoin', price: '$68,210', change: '+0.74%' },
-  { symbol: 'SPY', name: 'S&P 500 ETF', price: '$556.11', change: '+0.31%' }
+const pulseRows = [
+  { symbol: 'NVDA', venue: 'NASDAQ', price: '127.44', move: '+2.18%', tone: 'up' },
+  { symbol: 'BTC', venue: 'CRYPTO', price: '68,210', move: '+0.74%', tone: 'up' },
+  { symbol: 'SPY', venue: 'NYSE', price: '556.11', move: '+0.31%', tone: 'up' },
+  { symbol: 'VIX', venue: 'CBOE', price: '14.02', move: '-1.04%', tone: 'down' }
+];
+
+const dockItems = [
+  'Most Viewed',
+  'Watchlists',
+  'Alerts',
+  'News',
+  'Estimator',
+  'Cross-Asset'
 ];
 
 export function App() {
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div className="brand" aria-label="MarketLens">
-          <div className="brand-mark" aria-hidden="true">
-            ML
-          </div>
-          <span>MarketLens</span>
-        </div>
-        <div className="status-pill">React SPA + Axum API scaffold</div>
-      </header>
-
-      <section className="workspace hero">
-        <div>
-          <h1>MarketLens</h1>
-          <p>
-            A real-time market intelligence workspace for tracking instruments,
-            comparing assets, monitoring alerts, and building estimator reports.
-          </p>
-        </div>
-
-        <aside className="panel" aria-label="Market preview">
-          <div className="panel-header">
-            <span>Watch Preview</span>
-            <span>Live-ready</span>
-          </div>
-          <div className="ticker-list">
-            {tickers.map((ticker) => (
-              <div className="ticker-row" key={ticker.symbol}>
-                <div>
-                  <div className="symbol">{ticker.symbol}</div>
-                  <div className="name">{ticker.name}</div>
-                </div>
-                <div>
-                  <div className="price">{ticker.price}</div>
-                  <div className="change">{ticker.change}</div>
-                </div>
+    <AppShell>
+      <section className="dashboard-grid" aria-label="MarketLens workspace">
+        <Panel title="Market Pulse" eyebrow="LIVE BOARD" tone="accent">
+          <div className="quote-table" role="table" aria-label="Market pulse">
+            <div className="quote-table__head" role="row">
+              <span role="columnheader">Symbol</span>
+              <span role="columnheader">Venue</span>
+              <span role="columnheader">Last</span>
+              <span role="columnheader">24H</span>
+            </div>
+            {pulseRows.map((row) => (
+              <div className="quote-table__row" role="row" key={row.symbol}>
+                <span className="quote-table__symbol" role="cell">
+                  {row.symbol}
+                </span>
+                <span role="cell">{row.venue}</span>
+                <span role="cell">{row.price}</span>
+                <span className={`quote-table__move quote-table__move--${row.tone}`} role="cell">
+                  {row.move}
+                </span>
               </div>
             ))}
           </div>
-        </aside>
+        </Panel>
+
+        <Panel title="Dock Matrix" eyebrow="PANEL SLOTS">
+          <div className="dock-grid">
+            {dockItems.map((item) => (
+              <div className="dock-slot" key={item}>
+                <span>{item}</span>
+                <small>Reserved</small>
+              </div>
+            ))}
+          </div>
+        </Panel>
+
+        <Panel title="Signal Stack" eyebrow="LAYOUT PRIMITIVE" className="dashboard-grid__wide">
+          <div className="signal-stack">
+            <div>
+              <strong>Primary rail</strong>
+              <span>Navigation stays fixed for repeated scans.</span>
+            </div>
+            <div>
+              <strong>Panel primitive</strong>
+              <span>Future market, alert, news, and estimator views dock into the same shell.</span>
+            </div>
+            <div>
+              <strong>Terminal theme</strong>
+              <span>Black base, lime dominant controls, amber risk states, cyan data highlights.</span>
+            </div>
+          </div>
+        </Panel>
       </section>
-    </main>
+    </AppShell>
   );
 }
