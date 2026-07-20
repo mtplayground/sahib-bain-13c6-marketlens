@@ -1,3 +1,4 @@
+mod auth;
 mod config;
 mod db;
 mod redis;
@@ -39,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn app(state: AppState) -> Router {
     Router::new()
-        .nest("/api/v1", routes::api_router())
+        .nest("/api/v1", routes::api_router().merge(auth::router()))
         .merge(ws::router())
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
