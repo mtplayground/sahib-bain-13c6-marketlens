@@ -1,8 +1,9 @@
 use std::time::Duration;
 
 use axum::{
-    extract::{Query, State},
+    extract::{Extension, Query, Request, State},
     http::{header::COOKIE, HeaderMap, StatusCode},
+    middleware::Next,
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
@@ -29,13 +30,18 @@ use crate::{
 
 const SESSION_COOKIE_NAME: &str = "mctai_session";
 
-pub fn router() -> Router<AppState> {
+pub fn public_router() -> Router<AppState> {
     Router::new()
         .route("/auth/login", get(login))
         .route("/auth/register", get(register))
+        .route("/auth/refresh", get(refresh))
+        .route("/auth/email-verification/confirm", get(confirm_verification))
+}
+
+pub fn protected_router() -> Router<AppState> {
+    Router::new()
         .route("/auth/session", get(session))
         .route("/auth/email-verification", post(send_verification))
-        .route("/auth/email-verification/confirm", get(confirm_verification))
 }
 
 async fn login(
@@ -56,46 +62,36 @@ async fn register(
     ))
 }
 
-async fn session(
+async fn refresh(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<SessionResponse>, AuthHandlerError> {
-    let claims = verify_session(state.config(), &headers).await?;
-    let profile = UserProfile::new(
-        claims.sub,
-        claims.email.unwrap_or_default(),
-        claims.email_verified.unwrap_or(false),
-        claims.name,
-        claims.picture,
-    )?;
-    let upsert = profile.into_upsert(Utc::now());
-    let user = upsert_user(&state, upsert).await?;
+) -> Result<Redirect, AuthHandlerError> {
+    Ok(Redirect::temporary(
+        auth_redirect_url(state.config(), &headers)?.as_str(),
+    ))
+}
 
-    Ok(Json(SessionResponse {
+async fn session(
+    Extension(auth): Extension<AuthenticatedSession>,
+) -> Json<SessionResponse> {
+    Json(SessionResponse {
         authenticated: true,
-        registration: if user.inserted { "new" } else { "returning" },
-        message: if user.inserted {
+        registration: auth.registration.as_str(),
+        message: if auth.registration == SessionRegistration::New {
             "Registration complete!"
         } else {
             "Welcome back."
         },
-        user: user.user,
-    }))
+        user: auth.user,
+    })
 }
 
 async fn send_verification(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthenticatedSession>,
     headers: HeaderMap,
 ) -> Result<Json<SendVerificationResponse>, AuthHandlerError> {
-    let claims = verify_session(state.config(), &headers).await?;
-    let profile = UserProfile::new(
-        claims.sub,
-        claims.email.unwrap_or_default(),
-        claims.email_verified.unwrap_or(false),
-        claims.name,
-        claims.picture,
-    )?;
-    let user = upsert_user(&state, profile.into_upsert(Utc::now())).await?.user;
+    let user = auth.user;
 
     if user.email_verified {
         return Ok(Json(SendVerificationResponse {
@@ -151,6 +147,46 @@ async fn confirm_verification(
         status: "verified",
         user,
     }))
+}
+
+pub async fn require_auth(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    match authenticate_request(&state, &headers).await {
+        Ok(auth) => {
+            request.extensions_mut().insert(auth);
+            next.run(request).await
+        }
+        Err(error) => error.into_response(),
+    }
+}
+
+pub async fn authenticate_request(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<AuthenticatedSession, AuthHandlerError> {
+    let claims = verify_session(state.config(), headers).await?;
+    let profile = UserProfile::new(
+        claims.sub.clone(),
+        claims.email.clone().unwrap_or_default(),
+        claims.email_verified.unwrap_or(false),
+        claims.name.clone(),
+        claims.picture.clone(),
+    )?;
+    let upsert = upsert_user(state, profile.into_upsert(Utc::now())).await?;
+
+    Ok(AuthenticatedSession {
+        claims,
+        registration: if upsert.inserted {
+            SessionRegistration::New
+        } else {
+            SessionRegistration::Returning
+        },
+        user: upsert.user,
+    })
 }
 
 pub async fn verify_session(
@@ -418,6 +454,28 @@ pub struct SessionClaims {
     pub picture: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct AuthenticatedSession {
+    pub claims: SessionClaims,
+    pub user: User,
+    pub registration: SessionRegistration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionRegistration {
+    New,
+    Returning,
+}
+
+impl SessionRegistration {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Returning => "returning",
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum AuthError {
     #[error("missing mctai_session cookie")]
@@ -456,7 +514,7 @@ impl AuthError {
 }
 
 #[derive(Debug, Error)]
-enum AuthHandlerError {
+pub enum AuthHandlerError {
     #[error("{0}")]
     Auth(#[from] AuthError),
     #[error("{0}")]
@@ -473,50 +531,54 @@ enum AuthHandlerError {
     InvalidVerificationToken,
 }
 
+impl AuthHandlerError {
+    pub fn status_code(&self) -> StatusCode {
+        match self {
+            Self::Auth(error) => error.status_code(),
+            Self::UserModel(_) => StatusCode::BAD_REQUEST,
+            Self::Email(EmailError::RateLimited) => StatusCode::TOO_MANY_REQUESTS,
+            Self::Email(_) => StatusCode::BAD_GATEWAY,
+            Self::Database(_) | Self::RedirectUrl(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::MissingVerificationToken | Self::InvalidVerificationToken => {
+                StatusCode::BAD_REQUEST
+            }
+        }
+    }
+
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Auth(error) => error.code(),
+            Self::UserModel(_) => "invalid_user_profile",
+            Self::Email(EmailError::RateLimited) => "email_rate_limited",
+            Self::Email(_) => "email_send_failed",
+            Self::Database(_) => "user_persistence_failed",
+            Self::RedirectUrl(_) => "auth_redirect_failed",
+            Self::MissingVerificationToken => "missing_verification_token",
+            Self::InvalidVerificationToken => "invalid_verification_token",
+        }
+    }
+
+    pub fn public_message(&self) -> String {
+        match self {
+            Self::Auth(error) => error.public_message().to_owned(),
+            Self::UserModel(_) => "session profile is missing required user fields".to_owned(),
+            Self::Email(EmailError::RateLimited) => {
+                "email service is rate limited; try again shortly".to_owned()
+            }
+            Self::Email(_) => "failed to send verification email".to_owned(),
+            Self::Database(_) => "failed to persist authenticated user".to_owned(),
+            Self::RedirectUrl(_) => "failed to build authentication redirect".to_owned(),
+            Self::MissingVerificationToken => "verification token is required".to_owned(),
+            Self::InvalidVerificationToken => "verification token is invalid or expired".to_owned(),
+        }
+    }
+}
+
 impl IntoResponse for AuthHandlerError {
     fn into_response(self) -> Response {
-        let (status, code, message) = match &self {
-            Self::Auth(error) => (
-                error.status_code(),
-                error.code(),
-                error.public_message().to_owned(),
-            ),
-            Self::UserModel(_) => (
-                StatusCode::BAD_REQUEST,
-                "invalid_user_profile",
-                "session profile is missing required user fields".to_owned(),
-            ),
-            Self::Email(EmailError::RateLimited) => (
-                StatusCode::TOO_MANY_REQUESTS,
-                "email_rate_limited",
-                "email service is rate limited; try again shortly".to_owned(),
-            ),
-            Self::Email(_) => (
-                StatusCode::BAD_GATEWAY,
-                "email_send_failed",
-                "failed to send verification email".to_owned(),
-            ),
-            Self::Database(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "user_persistence_failed",
-                "failed to persist authenticated user".to_owned(),
-            ),
-            Self::RedirectUrl(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "auth_redirect_failed",
-                "failed to build authentication redirect".to_owned(),
-            ),
-            Self::MissingVerificationToken => (
-                StatusCode::BAD_REQUEST,
-                "missing_verification_token",
-                "verification token is required".to_owned(),
-            ),
-            Self::InvalidVerificationToken => (
-                StatusCode::BAD_REQUEST,
-                "invalid_verification_token",
-                "verification token is invalid or expired".to_owned(),
-            ),
-        };
+        let status = self.status_code();
+        let code = self.code();
+        let message = self.public_message();
 
         if status.is_server_error() || matches!(self, Self::Email(_)) {
             tracing::error!(%self, "auth handler failed");

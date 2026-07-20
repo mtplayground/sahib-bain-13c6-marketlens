@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    auth::{verify_session, SessionClaims},
+    auth::{authenticate_request, SessionClaims},
     redis::channels,
     state::AppState,
 };
@@ -61,13 +61,12 @@ async fn websocket_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Response {
-    match verify_session(state.config(), &headers).await {
-        Ok(claims) => ws.on_upgrade(move |socket| websocket_session(socket, claims)),
+    match authenticate_request(&state, &headers).await {
+        Ok(auth) => ws.on_upgrade(move |socket| websocket_session(socket, auth.claims)),
         Err(error) => {
-            let status = error.status_code();
             tracing::warn!(%error, "WebSocket handshake rejected");
             (
-                status,
+                error.status_code(),
                 Json(ErrorMessage {
                     r#type: "error",
                     code: error.code(),
@@ -312,7 +311,7 @@ enum ServerMessage {
 struct ErrorMessage {
     r#type: &'static str,
     code: &'static str,
-    message: &'static str,
+    message: String,
 }
 
 #[derive(Serialize)]

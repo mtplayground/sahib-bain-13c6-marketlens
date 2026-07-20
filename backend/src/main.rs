@@ -8,7 +8,7 @@ mod state;
 mod users;
 mod ws;
 
-use axum::Router;
+use axum::{middleware, Router};
 use config::AppConfig;
 use db::Database;
 use redis::RedisClient;
@@ -40,8 +40,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn app(state: AppState) -> Router {
+    let protected_auth = auth::protected_router()
+        .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_auth));
+
     Router::new()
-        .nest("/api/v1", routes::api_router().merge(auth::router()))
+        .nest(
+            "/api/v1",
+            routes::api_router()
+                .merge(auth::public_router())
+                .merge(protected_auth),
+        )
         .merge(ws::router())
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
