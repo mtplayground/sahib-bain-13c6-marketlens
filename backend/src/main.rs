@@ -3,6 +3,7 @@ mod db;
 mod redis;
 mod routes;
 mod state;
+mod ws;
 
 use axum::Router;
 use config::AppConfig;
@@ -38,6 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn app(state: AppState) -> Router {
     Router::new()
         .nest("/api/v1", routes::api_router())
+        .merge(ws::router())
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
