@@ -37,7 +37,7 @@ export type ApiProblem = {
 
 const apiBase = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
 
-function apiPath(path: string) {
+export function apiPath(path: string) {
   return `${apiBase}${path}`;
 }
 
