@@ -400,8 +400,7 @@ fn verification_link(
     headers: &HeaderMap,
     token: &str,
 ) -> Result<String, url::ParseError> {
-    let mut url = Url::parse(public_origin(config, headers).as_str())?
-        .join("/api/v1/auth/email-verification/confirm")?;
+    let mut url = Url::parse(public_origin(config, headers).as_str())?.join("/verify")?;
     url.query_pairs_mut().append_pair("token", token);
     Ok(url.to_string())
 }
@@ -745,7 +744,7 @@ mod tests {
 
         assert_eq!(
             link,
-            "https://marketlens.mctai.app/api/v1/auth/email-verification/confirm?token=abc123"
+            "https://marketlens.mctai.app/verify?token=abc123"
         );
     }
 
