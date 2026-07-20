@@ -5,13 +5,21 @@ import {
   KeyRound,
   LogIn,
   MailCheck,
+  RadioTower,
   RefreshCw,
   ShieldCheck,
-  UserPlus
+  UserPlus,
+  Wifi,
+  WifiOff
 } from 'lucide-react';
 import './App.css';
 import { AppShell } from './components/AppShell';
 import { Panel } from './components/Panel';
+import {
+  useRealtimeMarketData,
+  type RealtimeConnectionState,
+  type RealtimeTickEvent
+} from './realtime';
 import {
   confirmVerificationToken,
   loadSession,
@@ -43,6 +51,8 @@ const initialSessionState: SessionState = {
   session: null,
   error: null
 };
+
+const realtimeSymbols = ['SPY', 'BTC/USD', 'NVDA', 'ETH/USD', 'VIX'];
 
 export function App() {
   const [sessionState, setSessionState] = useState<SessionState>(initialSessionState);
@@ -338,7 +348,99 @@ function AuthenticatedDashboard({
           </div>
         </div>
       </Panel>
+
+      <RealtimeConsole />
     </section>
+  );
+}
+
+function RealtimeConsole() {
+  const [selectedSymbols, setSelectedSymbols] = useState(['SPY', 'BTC/USD']);
+  const realtime = useRealtimeMarketData(selectedSymbols);
+
+  function toggleSymbol(symbol: string) {
+    setSelectedSymbols((current) =>
+      current.includes(symbol)
+        ? current.filter((currentSymbol) => currentSymbol !== symbol)
+        : [...current, symbol]
+    );
+  }
+
+  return (
+    <Panel
+      title="Realtime Subscriptions"
+      eyebrow="WS FAN-OUT"
+      className="dashboard-grid__wide"
+      actions={<RealtimeStatusPill connection={realtime.connection} />}
+    >
+      <div className="realtime-console">
+        <div className="realtime-console__controls" aria-label="Realtime instruments">
+          {realtimeSymbols.map((symbol) => {
+            const selected = selectedSymbols.includes(symbol);
+            return (
+              <button
+                className={selected ? 'symbol-toggle is-selected' : 'symbol-toggle'}
+                key={symbol}
+                type="button"
+                onClick={() => toggleSymbol(symbol)}
+                aria-pressed={selected}
+              >
+                <RadioTower size={15} />
+                <span>{symbol}</span>
+              </button>
+            );
+          })}
+          <button className="terminal-button" type="button" onClick={realtime.reconnectNow}>
+            <RefreshCw size={18} />
+            <span>Reconnect</span>
+          </button>
+        </div>
+
+        <div className="realtime-console__meta">
+          <ContractItem label="Subscriptions" value={String(realtime.connection.activeSubscriptions)} />
+          <ContractItem label="Last socket" value={timestampOrDash(realtime.connection.lastOpenedAt)} />
+          <ContractItem label="Last event" value={timestampOrDash(realtime.connection.lastMessageAt)} />
+          <ContractItem label="Fallback" value={fallbackLabel(realtime.connection)} />
+        </div>
+
+        <RealtimeEventTape events={realtime.events} />
+      </div>
+    </Panel>
+  );
+}
+
+function RealtimeStatusPill({ connection }: { connection: RealtimeConnectionState }) {
+  const statusClass = `auth-pill auth-pill--${connection.status}`;
+  const Icon = connection.status === 'open' ? Wifi : WifiOff;
+
+  return (
+    <span className={statusClass}>
+      <Icon size={14} />
+      {connection.status}
+    </span>
+  );
+}
+
+function RealtimeEventTape({ events }: { events: RealtimeTickEvent[] }) {
+  if (events.length === 0) {
+    return (
+      <div className="realtime-empty">
+        <RadioTower size={20} />
+        <span>No ticks received for the active symbols.</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="realtime-tape" aria-label="Realtime event tape">
+      {events.map((event) => (
+        <div className="realtime-tape__row" key={event.id}>
+          <span className="realtime-tape__symbol">{event.symbol}</span>
+          <span>{formatRealtimePayload(event.payload)}</span>
+          <time dateTime={event.receivedAt}>{formatTimestamp(event.receivedAt)}</time>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -537,4 +639,48 @@ function formatTimestamp(value: string) {
     return value;
   }
   return date.toLocaleString();
+}
+
+function timestampOrDash(value: string | null) {
+  return value ? formatTimestamp(value) : '-';
+}
+
+function fallbackLabel(connection: RealtimeConnectionState) {
+  if (!connection.fallbackCheckedAt) {
+    return connection.status === 'fallback' ? 'starting' : 'standby';
+  }
+  return `${connection.fallbackStatus || 'checked'} at ${formatTimestamp(connection.fallbackCheckedAt)}`;
+}
+
+function formatRealtimePayload(payload: unknown) {
+  if (payload && typeof payload === 'object') {
+    const record = payload as Record<string, unknown>;
+    const type = typeof record.type === 'string' ? record.type : 'event';
+    const price = formatPayloadNumber(record.price);
+    const change = formatPayloadNumber(record.change);
+
+    if (price && change) {
+      return `${type} price ${price} change ${change}`;
+    }
+    if (price) {
+      return `${type} price ${price}`;
+    }
+    return type;
+  }
+
+  if (typeof payload === 'string') {
+    return payload;
+  }
+
+  return 'event';
+}
+
+function formatPayloadNumber(value: unknown) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value.toFixed(2);
+  }
+  if (typeof value === 'string' && value.trim()) {
+    return value;
+  }
+  return null;
 }

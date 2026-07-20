@@ -460,6 +460,17 @@
   color: var(--ml-lime-soft);
 }
 
+.auth-pill--open {
+  color: var(--ml-lime-soft);
+  border-color: var(--ml-border-strong);
+}
+
+.auth-pill--connecting,
+.auth-pill--reconnecting,
+.auth-pill--fallback {
+  color: var(--ml-amber);
+}
+
 .auth-pill--warning,
 .auth-pill--anonymous,
 .auth-pill--error {
@@ -583,6 +594,102 @@
   color: var(--ml-lime-soft);
 }
 
+.realtime-console {
+  display: grid;
+  gap: 1rem;
+}
+
+.realtime-console__controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  align-items: center;
+}
+
+.symbol-toggle {
+  display: inline-flex;
+  gap: 0.45rem;
+  align-items: center;
+  justify-content: center;
+  min-width: 6.5rem;
+  min-height: 2.35rem;
+  padding: 0 0.75rem;
+  color: var(--ml-muted);
+  cursor: pointer;
+  border: 1px solid var(--ml-border);
+  border-radius: var(--ml-radius);
+  background: rgba(7, 13, 8, 0.86);
+}
+
+.symbol-toggle:hover,
+.symbol-toggle:focus-visible,
+.symbol-toggle.is-selected {
+  color: var(--ml-lime);
+  border-color: var(--ml-border-strong);
+  outline: none;
+  box-shadow: var(--ml-shadow);
+}
+
+.symbol-toggle.is-selected {
+  background: rgba(156, 255, 0, 0.1);
+}
+
+.realtime-console__meta {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.realtime-console__meta .contract-item {
+  align-content: start;
+  min-height: 5rem;
+  padding: 0.75rem;
+  border: 1px solid rgba(156, 255, 0, 0.14);
+  border-radius: var(--ml-radius);
+  background: rgba(156, 255, 0, 0.035);
+}
+
+.realtime-tape {
+  display: grid;
+  overflow: hidden;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  border: 1px solid rgba(156, 255, 0, 0.14);
+  border-radius: var(--ml-radius);
+}
+
+.realtime-tape__row {
+  display: grid;
+  grid-template-columns: minmax(5rem, 0.35fr) minmax(0, 1fr) minmax(11rem, 0.45fr);
+  gap: 0.75rem;
+  align-items: center;
+  min-height: 2.6rem;
+  padding: 0 0.8rem;
+  border-bottom: 1px solid rgba(156, 255, 0, 0.12);
+}
+
+.realtime-tape__row:last-child {
+  border-bottom: 0;
+}
+
+.realtime-tape__symbol {
+  color: var(--ml-lime);
+  font-weight: 800;
+}
+
+.realtime-tape time {
+  color: var(--ml-dim);
+  text-align: right;
+}
+
+.realtime-empty {
+  display: inline-flex;
+  gap: 0.6rem;
+  align-items: center;
+  min-height: 3rem;
+  color: var(--ml-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
 @media (max-width: 900px) {
   .market-shell {
     grid-template-columns: 1fr;
@@ -599,7 +706,8 @@
 
   .dashboard-grid,
   .auth-grid,
-  .signal-stack {
+  .signal-stack,
+  .realtime-console__meta {
     grid-template-columns: 1fr;
   }
 }
@@ -618,7 +726,8 @@
   .quote-table__head,
   .quote-table__row,
   .contract-item,
-  .verification-box {
+  .verification-box,
+  .realtime-tape__row {
     grid-template-columns: 1fr 1fr;
   }
 
@@ -633,6 +742,11 @@
 
   .verification-box .terminal-button {
     grid-column: 1 / -1;
+  }
+
+  .realtime-tape time {
+    grid-column: 1 / -1;
+    text-align: left;
   }
 
   .quote-table__head span:nth-child(2),
