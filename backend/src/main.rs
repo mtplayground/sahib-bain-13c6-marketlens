@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod db;
 mod email;
+mod ingestion;
 mod market_data;
 mod redis;
 mod routes;
