@@ -1,0 +1,65 @@
+:root {
+  --ml-bg: #030503;
+  --ml-bg-2: #070b07;
+  --ml-panel: rgba(7, 13, 8, 0.92);
+  --ml-panel-strong: rgba(10, 20, 11, 0.96);
+  --ml-border: rgba(156, 255, 0, 0.28);
+  --ml-border-strong: rgba(156, 255, 0, 0.58);
+  --ml-grid: rgba(156, 255, 0, 0.06);
+  --ml-lime: #9cff00;
+  --ml-lime-soft: #c7ff6b;
+  --ml-cyan: #4deeea;
+  --ml-amber: #ffcf5a;
+  --ml-red: #ff4f6d;
+  --ml-text: #efffe8;
+  --ml-muted: #8ea087;
+  --ml-dim: #60705b;
+  --ml-shadow: 0 0 28px rgba(156, 255, 0, 0.16);
+  --ml-radius: 8px;
+  --ml-rail-width: 15rem;
+  color: var(--ml-text);
+  background: var(--ml-bg);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  min-height: 100%;
+  background: var(--ml-bg);
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  border: 0;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+::selection {
+  color: #071006;
+  background: var(--ml-lime);
+}
