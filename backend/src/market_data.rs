@@ -63,6 +63,16 @@ pub enum AssetClass {
     GovernmentBond,
 }
 
+impl AssetClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Equity => "equity",
+            Self::CorporateBond => "corporate_bond",
+            Self::GovernmentBond => "government_bond",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InstrumentSearchRequest {
     pub query: String,
