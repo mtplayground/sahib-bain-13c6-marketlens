@@ -1,25 +1,28 @@
 use std::time::Duration;
 
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::{header::COOKIE, HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
 use jsonwebtoken::{
     decode, decode_header,
     jwk::JwkSet,
     Algorithm, DecodingKey, Validation,
 };
+use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::FromRow;
 use thiserror::Error;
 use url::Url;
 
 use crate::{
     config::AppConfig,
+    email::{send_email, EmailDelivery, EmailError},
     state::AppState,
     users::{UpsertUser, User, UserModelError, UserProfile},
 };
@@ -31,6 +34,8 @@ pub fn router() -> Router<AppState> {
         .route("/auth/login", get(login))
         .route("/auth/register", get(register))
         .route("/auth/session", get(session))
+        .route("/auth/email-verification", post(send_verification))
+        .route("/auth/email-verification/confirm", get(confirm_verification))
 }
 
 async fn login(
@@ -75,6 +80,76 @@ async fn session(
             "Welcome back."
         },
         user: user.user,
+    }))
+}
+
+async fn send_verification(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<SendVerificationResponse>, AuthHandlerError> {
+    let claims = verify_session(state.config(), &headers).await?;
+    let profile = UserProfile::new(
+        claims.sub,
+        claims.email.unwrap_or_default(),
+        claims.email_verified.unwrap_or(false),
+        claims.name,
+        claims.picture,
+    )?;
+    let user = upsert_user(&state, profile.into_upsert(Utc::now())).await?.user;
+
+    if user.email_verified {
+        return Ok(Json(SendVerificationResponse {
+            status: "already_verified",
+            email: user.email,
+            delivery: "not_needed",
+            message_id: None,
+            expires_at: None,
+        }));
+    }
+
+    let token = generate_verification_token();
+    let token_hash = hash_verification_token(token.as_str());
+    let expires_at = Utc::now() + ChronoDuration::hours(24);
+    store_verification_token(&state, user.sub.as_str(), user.email.as_str(), &token_hash, expires_at)
+        .await?;
+
+    let link = verification_link(state.config(), &headers, token.as_str())?;
+    let subject = "Verify your email address";
+    let html = verification_email_html(link.as_str());
+    let text = verification_email_text(link.as_str());
+    let delivery = send_email(state.config(), user.email.as_str(), subject, &html, &text).await?;
+    let (delivery_status, message_id) = match delivery {
+        EmailDelivery::Sent { message_id } => ("sent", message_id),
+        EmailDelivery::SkippedNotConfigured => ("skipped_not_configured", None),
+    };
+
+    Ok(Json(SendVerificationResponse {
+        status: "verification_pending",
+        email: user.email,
+        delivery: delivery_status,
+        message_id,
+        expires_at: Some(expires_at),
+    }))
+}
+
+async fn confirm_verification(
+    State(state): State<AppState>,
+    Query(query): Query<ConfirmVerificationQuery>,
+) -> Result<Json<ConfirmVerificationResponse>, AuthHandlerError> {
+    let token = query
+        .token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .ok_or(AuthHandlerError::MissingVerificationToken)?;
+    let token_hash = hash_verification_token(token);
+    let user = consume_verification_token(&state, token_hash.as_str())
+        .await?
+        .ok_or(AuthHandlerError::InvalidVerificationToken)?;
+
+    Ok(Json(ConfirmVerificationResponse {
+        status: "verified",
+        user,
     }))
 }
 
@@ -186,6 +261,82 @@ async fn upsert_user(state: &AppState, user: UpsertUser) -> Result<UpsertedUser,
     })
 }
 
+async fn store_verification_token(
+    state: &AppState,
+    user_sub: &str,
+    email: &str,
+    token_hash: &str,
+    expires_at: chrono::DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        UPDATE email_verification_tokens
+        SET consumed_at = NOW()
+        WHERE user_sub = $1
+            AND lower(email) = lower($2)
+            AND consumed_at IS NULL
+        "#,
+    )
+    .bind(user_sub)
+    .bind(email)
+    .execute(state.database().pool())
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO email_verification_tokens (user_sub, email, token_hash, expires_at)
+        VALUES ($1, $2, $3, $4)
+        "#,
+    )
+    .bind(user_sub)
+    .bind(email)
+    .bind(token_hash)
+    .bind(expires_at)
+    .execute(state.database().pool())
+    .await?;
+
+    Ok(())
+}
+
+async fn consume_verification_token(
+    state: &AppState,
+    token_hash: &str,
+) -> Result<Option<User>, sqlx::Error> {
+    sqlx::query_as::<_, User>(
+        r#"
+        WITH consumed AS (
+            UPDATE email_verification_tokens
+            SET consumed_at = NOW()
+            WHERE token_hash = $1
+                AND consumed_at IS NULL
+                AND expires_at > NOW()
+            RETURNING user_sub, email
+        )
+        UPDATE users
+        SET
+            email_verified = TRUE,
+            email_verified_at = COALESCE(email_verified_at, NOW()),
+            updated_at = NOW()
+        FROM consumed
+        WHERE users.sub = consumed.user_sub
+            AND lower(users.email) = lower(consumed.email)
+        RETURNING
+            users.sub,
+            users.email,
+            users.email_verified,
+            users.email_verified_at,
+            users.name,
+            users.picture_url,
+            users.created_at,
+            users.updated_at,
+            users.last_seen_at
+        "#,
+    )
+    .bind(token_hash)
+    .fetch_optional(state.database().pool())
+    .await
+}
+
 fn auth_redirect_url(config: &AppConfig, headers: &HeaderMap) -> Result<String, url::ParseError> {
     let mut url = Url::parse(config.mctai_auth_url.as_str())?.join("login")?;
     let return_to = frontend_return_to(config, headers);
@@ -206,6 +357,52 @@ fn frontend_return_to(config: &AppConfig, headers: &HeaderMap) -> String {
     }
 
     "/".to_owned()
+}
+
+fn verification_link(
+    config: &AppConfig,
+    headers: &HeaderMap,
+    token: &str,
+) -> Result<String, url::ParseError> {
+    let mut url = Url::parse(public_origin(config, headers).as_str())?
+        .join("/api/v1/auth/email-verification/confirm")?;
+    url.query_pairs_mut().append_pair("token", token);
+    Ok(url.to_string())
+}
+
+fn public_origin(config: &AppConfig, headers: &HeaderMap) -> String {
+    if let Some(self_url) = config.self_url.as_deref() {
+        return format!("{}/", self_url.trim_end_matches('/'));
+    }
+
+    let proto = header_value(headers, "x-forwarded-proto").unwrap_or("http");
+    if let Some(host) = header_value(headers, "x-forwarded-host") {
+        return format!("{proto}://{host}/");
+    }
+
+    format!("http://{}:{}/", config.host, config.port)
+}
+
+fn generate_verification_token() -> String {
+    let mut bytes = [0_u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+fn hash_verification_token(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn verification_email_html(link: &str) -> String {
+    format!(
+        "<p>Confirm this email address by opening this secure verification link:</p><p><a href=\"{link}\">Verify email address</a></p><p>This link expires in 24 hours.</p>"
+    )
+}
+
+fn verification_email_text(link: &str) -> String {
+    format!("Confirm this email address by opening this verification link: {link}\n\nThis link expires in 24 hours.")
 }
 
 fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -264,10 +461,16 @@ enum AuthHandlerError {
     Auth(#[from] AuthError),
     #[error("{0}")]
     UserModel(#[from] UserModelError),
+    #[error("{0}")]
+    Email(#[from] EmailError),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
     #[error("auth redirect URL error: {0}")]
     RedirectUrl(#[from] url::ParseError),
+    #[error("missing verification token")]
+    MissingVerificationToken,
+    #[error("invalid or expired verification token")]
+    InvalidVerificationToken,
 }
 
 impl IntoResponse for AuthHandlerError {
@@ -283,6 +486,16 @@ impl IntoResponse for AuthHandlerError {
                 "invalid_user_profile",
                 "session profile is missing required user fields".to_owned(),
             ),
+            Self::Email(EmailError::RateLimited) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "email_rate_limited",
+                "email service is rate limited; try again shortly".to_owned(),
+            ),
+            Self::Email(_) => (
+                StatusCode::BAD_GATEWAY,
+                "email_send_failed",
+                "failed to send verification email".to_owned(),
+            ),
             Self::Database(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "user_persistence_failed",
@@ -293,9 +506,19 @@ impl IntoResponse for AuthHandlerError {
                 "auth_redirect_failed",
                 "failed to build authentication redirect".to_owned(),
             ),
+            Self::MissingVerificationToken => (
+                StatusCode::BAD_REQUEST,
+                "missing_verification_token",
+                "verification token is required".to_owned(),
+            ),
+            Self::InvalidVerificationToken => (
+                StatusCode::BAD_REQUEST,
+                "invalid_verification_token",
+                "verification token is invalid or expired".to_owned(),
+            ),
         };
 
-        if status.is_server_error() {
+        if status.is_server_error() || matches!(self, Self::Email(_)) {
             tracing::error!(%self, "auth handler failed");
         }
 
@@ -353,6 +576,26 @@ struct SessionResponse {
     user: User,
 }
 
+#[derive(Debug, Deserialize)]
+struct ConfirmVerificationQuery {
+    token: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SendVerificationResponse {
+    status: &'static str,
+    email: String,
+    delivery: &'static str,
+    message_id: Option<String>,
+    expires_at: Option<chrono::DateTime<Utc>>,
+}
+
+#[derive(Serialize)]
+struct ConfirmVerificationResponse {
+    status: &'static str,
+    user: User,
+}
+
 #[derive(Serialize)]
 struct ErrorResponse {
     error: &'static str,
@@ -365,7 +608,10 @@ mod tests {
 
     use crate::config::AppConfig;
 
-    use super::{auth_redirect_url, frontend_return_to, session_cookie, COOKIE};
+    use super::{
+        auth_redirect_url, frontend_return_to, hash_verification_token, session_cookie,
+        verification_link, COOKIE,
+    };
 
     fn config() -> AppConfig {
         AppConfig {
@@ -425,5 +671,28 @@ mod tests {
             frontend_return_to(&config, &headers),
             "https://public.example/"
         );
+    }
+
+    #[test]
+    fn builds_verification_link_to_api_confirm_endpoint() {
+        let headers = HeaderMap::new();
+        let link = match verification_link(&config(), &headers, "abc123") {
+            Ok(link) => link,
+            Err(error) => panic!("verification link should be valid: {error}"),
+        };
+
+        assert_eq!(
+            link,
+            "https://marketlens.mctai.app/api/v1/auth/email-verification/confirm?token=abc123"
+        );
+    }
+
+    #[test]
+    fn hashes_verification_tokens_without_storing_raw_token() {
+        let hash = hash_verification_token("abc123");
+
+        assert_ne!(hash, "abc123");
+        assert_eq!(hash.len(), 64);
+        assert_eq!(hash, hash_verification_token("abc123"));
     }
 }
