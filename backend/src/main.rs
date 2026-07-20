@@ -3,6 +3,7 @@ mod config;
 mod db;
 mod email;
 mod ingestion;
+mod instruments;
 mod market_data;
 mod redis;
 mod routes;
