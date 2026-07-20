@@ -13,6 +13,9 @@ pub struct AppConfig {
     pub redis_url: String,
     pub jwt_secret: String,
     pub market_data_provider_key: String,
+    pub market_data_provider_name: String,
+    pub market_data_provider_base_url: Option<String>,
+    pub market_data_request_timeout_seconds: u64,
     pub news_provider_key: String,
     pub mctai_auth_url: String,
     pub mctai_auth_app_token: String,
@@ -63,6 +66,13 @@ impl AppConfig {
             redis_url: required_env("REDIS_URL")?,
             jwt_secret: required_env("JWT_SECRET")?,
             market_data_provider_key: required_env("MARKET_DATA_PROVIDER_KEY")?,
+            market_data_provider_name: optional_env("MARKET_DATA_PROVIDER_NAME")?
+                .unwrap_or_else(|| "http-json".to_owned()),
+            market_data_provider_base_url: optional_env("MARKET_DATA_PROVIDER_BASE_URL")?,
+            market_data_request_timeout_seconds: parse_optional_u64(
+                "MARKET_DATA_REQUEST_TIMEOUT_SECONDS",
+                10,
+            )?,
             news_provider_key: required_env("NEWS_PROVIDER_KEY")?,
             mctai_auth_url: required_env("MCTAI_AUTH_URL")?,
             mctai_auth_app_token: required_env("MCTAI_AUTH_APP_TOKEN")?,
