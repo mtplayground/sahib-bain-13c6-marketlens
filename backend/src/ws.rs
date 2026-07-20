@@ -1,30 +1,24 @@
-use std::{collections::HashSet, time::Duration};
+use std::collections::HashSet;
 
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
-    http::{header::COOKIE, HeaderMap, StatusCode},
+    http::HeaderMap,
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
-use jsonwebtoken::{
-    decode, decode_header,
-    jwk::JwkSet,
-    Algorithm, DecodingKey, Validation,
-};
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
+    auth::{verify_session, SessionClaims},
     redis::channels,
     state::AppState,
 };
 
-const SESSION_COOKIE_NAME: &str = "mctai_session";
 const HEARTBEAT_INTERVAL_MS: u64 = 30_000;
 const RECONNECT_INITIAL_DELAY_MS: u64 = 1_000;
 const RECONNECT_MAX_DELAY_MS: u64 = 30_000;
@@ -67,7 +61,7 @@ async fn websocket_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Response {
-    match authenticate(&state, &headers).await {
+    match verify_session(state.config(), &headers).await {
         Ok(claims) => ws.on_upgrade(move |socket| websocket_session(socket, claims)),
         Err(error) => {
             let status = error.status_code();
@@ -239,112 +233,6 @@ async fn send_json<T: Serialize>(socket: &mut WebSocket, value: &T) -> Result<()
     socket.send(Message::Text(payload)).await
 }
 
-async fn authenticate(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Result<SessionClaims, HandshakeError> {
-    let token = session_cookie(headers).ok_or(HandshakeError::MissingSession)?;
-    let header = decode_header(token).map_err(|_| HandshakeError::InvalidSession)?;
-    let kid = header.kid.ok_or(HandshakeError::InvalidSession)?;
-    let jwks = fetch_jwks(state.config().mctai_auth_jwks_url.as_str()).await?;
-    let jwk = jwks.find(&kid).ok_or(HandshakeError::InvalidSession)?;
-    let key = DecodingKey::from_jwk(jwk).map_err(|_| HandshakeError::InvalidSession)?;
-    let mut validation = validation_for_algorithm(header.alg)?;
-    validation.set_audience(&[state.config().mctai_auth_app_token.as_str()]);
-    validation.set_issuer(&[state.config().mctai_auth_url.as_str()]);
-
-    let decoded = decode::<SessionClaims>(token, &key, &validation)
-        .map_err(|_| HandshakeError::InvalidSession)?;
-
-    Ok(decoded.claims)
-}
-
-async fn fetch_jwks(jwks_url: &str) -> Result<JwkSet, HandshakeError> {
-    let response = tokio::time::timeout(Duration::from_secs(5), reqwest::get(jwks_url))
-        .await
-        .map_err(|_| HandshakeError::JwksTimeout)?
-        .map_err(|source| HandshakeError::JwksFetch { source })?;
-    let response = response
-        .error_for_status()
-        .map_err(|source| HandshakeError::JwksFetch { source })?;
-
-    response
-        .json::<JwkSet>()
-        .await
-        .map_err(|source| HandshakeError::JwksFetch { source })
-}
-
-fn session_cookie(headers: &HeaderMap) -> Option<&str> {
-    let cookie_header = headers.get(COOKIE)?.to_str().ok()?;
-
-    cookie_header.split(';').find_map(|cookie| {
-        let (name, value) = cookie.trim().split_once('=')?;
-        (name == SESSION_COOKIE_NAME && !value.is_empty()).then_some(value)
-    })
-}
-
-fn validation_for_algorithm(algorithm: Algorithm) -> Result<Validation, HandshakeError> {
-    match algorithm {
-        Algorithm::RS256
-        | Algorithm::RS384
-        | Algorithm::RS512
-        | Algorithm::PS256
-        | Algorithm::PS384
-        | Algorithm::PS512
-        | Algorithm::ES256
-        | Algorithm::ES384 => Ok(Validation::new(algorithm)),
-        Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => {
-            Err(HandshakeError::InvalidSession)
-        }
-        _ => Err(HandshakeError::InvalidSession),
-    }
-}
-
-#[derive(Debug, Error)]
-enum HandshakeError {
-    #[error("missing mctai_session cookie")]
-    MissingSession,
-    #[error("invalid mctai_session cookie")]
-    InvalidSession,
-    #[error("timed out fetching auth JWKS")]
-    JwksTimeout,
-    #[error("failed to fetch auth JWKS: {source}")]
-    JwksFetch { source: reqwest::Error },
-}
-
-impl HandshakeError {
-    fn status_code(&self) -> StatusCode {
-        match self {
-            Self::MissingSession | Self::InvalidSession => StatusCode::UNAUTHORIZED,
-            Self::JwksTimeout | Self::JwksFetch { .. } => StatusCode::SERVICE_UNAVAILABLE,
-        }
-    }
-
-    fn code(&self) -> &'static str {
-        match self {
-            Self::MissingSession => "missing_session",
-            Self::InvalidSession => "invalid_session",
-            Self::JwksTimeout | Self::JwksFetch { .. } => "auth_unavailable",
-        }
-    }
-
-    fn public_message(&self) -> &'static str {
-        match self {
-            Self::MissingSession => "WebSocket authentication requires mctai_session cookie",
-            Self::InvalidSession => "WebSocket authentication failed",
-            Self::JwksTimeout | Self::JwksFetch { .. } => "authentication service is unavailable",
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Clone)]
-struct SessionClaims {
-    sub: String,
-    email: Option<String>,
-    name: Option<String>,
-    picture: Option<String>,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMessage {
@@ -462,20 +350,7 @@ struct SubscriptionContract {
 
 #[cfg(test)]
 mod tests {
-    use axum::http::{HeaderMap, HeaderValue};
-
-    use super::{session_cookie, ClientMessage, SubscriptionTopic, COOKIE};
-
-    #[test]
-    fn extracts_mctai_session_cookie() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            COOKIE,
-            HeaderValue::from_static("other=value; mctai_session=session-token; theme=dark"),
-        );
-
-        assert_eq!(session_cookie(&headers), Some("session-token"));
-    }
+    use super::{ClientMessage, SubscriptionTopic};
 
     #[test]
     fn parses_market_tick_subscription_message() {

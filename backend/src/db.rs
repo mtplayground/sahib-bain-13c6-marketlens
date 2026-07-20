@@ -102,6 +102,10 @@ impl Database {
             },
         }
     }
+
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
 }
 
 fn should_retry_without_tls(database_url: &str, error: &sqlx::Error) -> bool {
