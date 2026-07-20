@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use axum::{
     extract::{
@@ -10,18 +10,28 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use futures_util::{
+    stream::SplitSink,
+    SinkExt, StreamExt,
+};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
     auth::{authenticate_request, SessionClaims},
-    redis::channels,
+    redis::{channels, RedisClient},
     state::AppState,
 };
 
 const HEARTBEAT_INTERVAL_MS: u64 = 30_000;
 const RECONNECT_INITIAL_DELAY_MS: u64 = 1_000;
 const RECONNECT_MAX_DELAY_MS: u64 = 30_000;
+const MARKET_TICKS_SUBSCRIPTION_HELP: &str = concat!(
+    "subscribe with channel=market_ticks and instrument_symbol; ",
+    "ticks are delivered as subscription.event messages when Redis publishes ",
+    "marketlens:market:ticks:*"
+);
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/ws", get(websocket_handler))
@@ -38,6 +48,7 @@ pub fn contract() -> WebSocketContract {
             "pong",
             "subscription.ack",
             "subscription.removed",
+            "subscription.event",
             "error",
         ],
         reconnect: ReconnectContract {
@@ -47,11 +58,9 @@ pub fn contract() -> WebSocketContract {
             resume_token: "connection_id",
         },
         subscriptions: SubscriptionContract {
-            market_ticks: concat!(
-                "subscribe with channel=market_ticks and instrument_symbol; ",
-                "acknowledges only until market data is wired"
-            ),
-            alert_events: "subscribe with channel=alert_events; scoped to the authenticated user",
+            market_ticks: MARKET_TICKS_SUBSCRIPTION_HELP,
+            alert_events:
+                "subscribe with channel=alert_events; scoped to the authenticated user's Redis channel",
         },
     }
 }
@@ -62,7 +71,10 @@ async fn websocket_handler(
     headers: HeaderMap,
 ) -> Response {
     match authenticate_request(&state, &headers).await {
-        Ok(auth) => ws.on_upgrade(move |socket| websocket_session(socket, auth.claims)),
+        Ok(auth) => {
+            let redis = state.redis().clone();
+            ws.on_upgrade(move |socket| websocket_session(socket, auth.claims, redis))
+        }
         Err(error) => {
             tracing::warn!(%error, "WebSocket handshake rejected");
             (
@@ -78,12 +90,57 @@ async fn websocket_handler(
     }
 }
 
-async fn websocket_session(mut socket: WebSocket, claims: SessionClaims) {
+type WsSender = SplitSink<WebSocket, Message>;
+
+async fn websocket_session(socket: WebSocket, claims: SessionClaims, redis: RedisClient) {
     let connection_id = Uuid::new_v4();
-    let mut subscriptions = HashSet::new();
+    let (mut sender, mut receiver) = socket.split();
+
+    let mut pubsub = match redis.pubsub().await {
+        Ok(pubsub) => pubsub,
+        Err(error) => {
+            tracing::error!(%error, %connection_id, "failed to open Redis pub/sub connection");
+            let _ = send_error(
+                &mut sender,
+                None,
+                "redis_unavailable",
+                "real-time subscriptions are temporarily unavailable",
+            )
+            .await;
+            return;
+        }
+    };
+
+    if let Err(error) = pubsub.psubscribe(channels::MARKET_TICKS_PATTERN).await {
+        tracing::error!(%error, %connection_id, "failed to subscribe to Redis market tick pattern");
+        let _ = send_error(
+            &mut sender,
+            None,
+            "redis_subscription_failed",
+            "market tick subscriptions are temporarily unavailable",
+        )
+        .await;
+        return;
+    }
+
+    let user_alert_channel = channels::user_alert_events(&claims.sub);
+    if let Err(error) = pubsub.subscribe(&user_alert_channel).await {
+        tracing::error!(%error, %connection_id, "failed to subscribe to Redis user alert channel");
+        let _ = send_error(
+            &mut sender,
+            None,
+            "redis_subscription_failed",
+            "alert subscriptions are temporarily unavailable",
+        )
+        .await;
+        return;
+    }
+
+    let mut redis_messages = pubsub.into_on_message();
+    let mut subscriptions = HashMap::new();
 
     if send_json(
-        &mut socket,
+        &mut sender,
         &ServerMessage::ConnectionReady {
             connection_id,
             user: AuthenticatedUser {
@@ -101,55 +158,86 @@ async fn websocket_session(mut socket: WebSocket, claims: SessionClaims) {
         return;
     }
 
-    while let Some(message) = socket.recv().await {
-        match message {
-            Ok(Message::Text(text)) => {
-                if handle_client_text(&mut socket, &claims, &mut subscriptions, &text)
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Ok(Message::Ping(payload)) => {
-                if socket.send(Message::Pong(payload)).await.is_err() {
-                    break;
-                }
-            }
-            Ok(Message::Pong(_)) => {}
-            Ok(Message::Close(_)) => break,
-            Ok(Message::Binary(_)) => {
-                if send_error(
-                    &mut socket,
-                    None,
-                    "unsupported_message",
-                    "binary messages are not supported",
+    loop {
+        tokio::select! {
+            client_message = receiver.next() => {
+                if !handle_client_message(
+                    &mut sender,
+                    &claims,
+                    &mut subscriptions,
+                    client_message,
+                    connection_id,
                 )
-                .await
-                .is_err()
-                {
+                .await {
                     break;
                 }
             }
-            Err(error) => {
-                tracing::debug!(%error, %connection_id, "WebSocket receive error");
-                break;
+            redis_message = redis_messages.next() => {
+                match redis_message {
+                    Some(message) => {
+                        if fan_out_redis_message(&mut sender, &subscriptions, message).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => {
+                        tracing::warn!(%connection_id, "Redis pub/sub stream ended");
+                        let _ = send_error(
+                            &mut sender,
+                            None,
+                            "redis_stream_closed",
+                            "real-time subscription stream closed",
+                        )
+                        .await;
+                        break;
+                    }
+                }
             }
         }
     }
 }
 
-async fn handle_client_text(
-    socket: &mut WebSocket,
+async fn handle_client_message(
+    sender: &mut WsSender,
     claims: &SessionClaims,
-    subscriptions: &mut HashSet<String>,
+    subscriptions: &mut HashMap<String, ActiveSubscription>,
+    message: Option<Result<Message, axum::Error>>,
+    connection_id: Uuid,
+) -> bool {
+    match message {
+        Some(Ok(Message::Text(text))) => {
+            handle_client_text(sender, claims, subscriptions, &text)
+                .await
+                .is_ok()
+        }
+        Some(Ok(Message::Ping(payload))) => sender.send(Message::Pong(payload)).await.is_ok(),
+        Some(Ok(Message::Pong(_))) => true,
+        Some(Ok(Message::Close(_))) | None => false,
+        Some(Ok(Message::Binary(_))) => send_error(
+            sender,
+            None,
+            "unsupported_message",
+            "binary messages are not supported",
+        )
+        .await
+        .is_ok(),
+        Some(Err(error)) => {
+            tracing::debug!(%error, %connection_id, "WebSocket receive error");
+            false
+        }
+    }
+}
+
+async fn handle_client_text(
+    sender: &mut WsSender,
+    claims: &SessionClaims,
+    subscriptions: &mut HashMap<String, ActiveSubscription>,
     text: &str,
 ) -> Result<(), axum::Error> {
     let message = match serde_json::from_str::<ClientMessage>(text) {
         Ok(message) => message,
         Err(error) => {
             return send_error(
-                socket,
+                sender,
                 None,
                 "invalid_json",
                 &format!("message must match the WebSocket contract: {error}"),
@@ -160,7 +248,7 @@ async fn handle_client_text(
 
     match message {
         ClientMessage::Ping { request_id } => {
-            send_json(socket, &ServerMessage::Pong { request_id }).await
+            send_json(sender, &ServerMessage::Pong { request_id }).await
         }
         ClientMessage::Subscribe {
             request_id,
@@ -168,15 +256,20 @@ async fn handle_client_text(
             topic,
         } => {
             let resolved = topic.resolve(&claims.sub);
-            subscriptions.insert(subscription_id.clone());
+            subscriptions.insert(
+                subscription_id.clone(),
+                ActiveSubscription {
+                    redis_channel: resolved.redis_channel.clone(),
+                },
+            );
             send_json(
-                socket,
+                sender,
                 &ServerMessage::SubscriptionAck {
                     request_id,
                     subscription_id,
                     status: "accepted",
                     redis_channel: resolved.redis_channel,
-                    note: "subscription registered; market data fan-out is not wired yet",
+                    note: "subscription registered; matching Redis events will fan out to this socket",
                 },
             )
             .await
@@ -187,11 +280,11 @@ async fn handle_client_text(
         } => {
             let removed = subscriptions.remove(&subscription_id);
             send_json(
-                socket,
+                sender,
                 &ServerMessage::SubscriptionRemoved {
                     request_id,
                     subscription_id,
-                    removed,
+                    removed: removed.is_some(),
                 },
             )
             .await
@@ -199,14 +292,68 @@ async fn handle_client_text(
     }
 }
 
+async fn fan_out_redis_message(
+    sender: &mut WsSender,
+    subscriptions: &HashMap<String, ActiveSubscription>,
+    message: ::redis::Msg,
+) -> Result<(), axum::Error> {
+    let redis_channel = message.get_channel_name().to_owned();
+    let subscription_ids = matching_subscription_ids(subscriptions, &redis_channel);
+    if subscription_ids.is_empty() {
+        return Ok(());
+    }
+
+    let payload_text = match message.get_payload::<String>() {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::warn!(%error, %redis_channel, "failed to decode Redis pub/sub payload");
+            return send_error(
+                sender,
+                None,
+                "invalid_redis_payload",
+                "received a Redis event payload that could not be decoded",
+            )
+            .await;
+        }
+    };
+    let payload = match serde_json::from_str::<Value>(&payload_text) {
+        Ok(value) => value,
+        Err(_) => Value::String(payload_text),
+    };
+
+    send_json(
+        sender,
+        &ServerMessage::SubscriptionEvent {
+            subscription_ids,
+            redis_channel,
+            payload,
+        },
+    )
+    .await
+}
+
+fn matching_subscription_ids(
+    subscriptions: &HashMap<String, ActiveSubscription>,
+    redis_channel: &str,
+) -> Vec<String> {
+    let mut subscription_ids = subscriptions
+        .iter()
+        .filter_map(|(subscription_id, subscription)| {
+            (subscription.redis_channel == redis_channel).then(|| subscription_id.clone())
+        })
+        .collect::<Vec<_>>();
+    subscription_ids.sort();
+    subscription_ids
+}
+
 async fn send_error(
-    socket: &mut WebSocket,
+    sender: &mut WsSender,
     request_id: Option<String>,
     code: &'static str,
     message: &str,
 ) -> Result<(), axum::Error> {
     send_json(
-        socket,
+        sender,
         &ServerMessage::Error {
             request_id,
             code,
@@ -216,12 +363,12 @@ async fn send_error(
     .await
 }
 
-async fn send_json<T: Serialize>(socket: &mut WebSocket, value: &T) -> Result<(), axum::Error> {
+async fn send_json<T: Serialize>(sender: &mut WsSender, value: &T) -> Result<(), axum::Error> {
     let payload = match serde_json::to_string(value) {
         Ok(payload) => payload,
         Err(error) => {
             tracing::error!(%error, "failed to serialize WebSocket message");
-            return socket
+            return sender
                 .send(Message::Text(
                     r#"{"type":"error","code":"serialization_failed","message":"failed to serialize server message"}"#.to_owned(),
                 ))
@@ -229,7 +376,7 @@ async fn send_json<T: Serialize>(socket: &mut WebSocket, value: &T) -> Result<()
         }
     };
 
-    socket.send(Message::Text(payload)).await
+    sender.send(Message::Text(payload)).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -274,6 +421,11 @@ struct ResolvedSubscription {
     redis_channel: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveSubscription {
+    redis_channel: String,
+}
+
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ServerMessage {
@@ -293,6 +445,12 @@ enum ServerMessage {
         status: &'static str,
         redis_channel: String,
         note: &'static str,
+    },
+    #[serde(rename = "subscription.event")]
+    SubscriptionEvent {
+        subscription_ids: Vec<String>,
+        redis_channel: String,
+        payload: Value,
     },
     #[serde(rename = "subscription.removed")]
     SubscriptionRemoved {
@@ -349,7 +507,11 @@ struct SubscriptionContract {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientMessage, SubscriptionTopic};
+    use std::collections::HashMap;
+
+    use super::{
+        matching_subscription_ids, ActiveSubscription, ClientMessage, SubscriptionTopic,
+    };
 
     #[test]
     fn parses_market_tick_subscription_message() {
@@ -367,5 +529,36 @@ mod tests {
             },
             _ => panic!("expected subscribe message"),
         }
+    }
+
+    #[test]
+    fn matches_only_subscriptions_for_redis_channel() {
+        let mut subscriptions = HashMap::new();
+        subscriptions.insert(
+            "sub-2".to_owned(),
+            ActiveSubscription {
+                redis_channel: "marketlens:market:ticks:spy".to_owned(),
+            },
+        );
+        subscriptions.insert(
+            "sub-1".to_owned(),
+            ActiveSubscription {
+                redis_channel: "marketlens:market:ticks:spy".to_owned(),
+            },
+        );
+        subscriptions.insert(
+            "other".to_owned(),
+            ActiveSubscription {
+                redis_channel: "marketlens:market:ticks:qqq".to_owned(),
+            },
+        );
+
+        assert_eq!(
+            matching_subscription_ids(&subscriptions, "marketlens:market:ticks:spy"),
+            vec!["sub-1".to_owned(), "sub-2".to_owned()]
+        );
+        assert!(
+            matching_subscription_ids(&subscriptions, "marketlens:market:ticks:iwm").is_empty()
+        );
     }
 }
