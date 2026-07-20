@@ -1,9 +1,11 @@
 mod config;
+mod db;
 mod routes;
 mod state;
 
 use axum::Router;
 use config::AppConfig;
+use db::Database;
 use state::AppState;
 use tokio::net::TcpListener;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -15,7 +17,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = AppConfig::from_env()?;
     let addr = config.socket_addr()?;
-    let state = AppState::new(config);
+    let database = Database::connect(&config).await?;
+    database.run_migrations().await?;
+    let state = AppState::new(config, database);
     let app = app(state);
     let listener = TcpListener::bind(addr).await?;
 

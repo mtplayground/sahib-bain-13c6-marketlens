@@ -1,6 +1,7 @@
-use axum::{extract::State, routing::get, Json, Router};
+use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
 use serde::Serialize;
 
+use crate::db::DatabaseHealth;
 use crate::state::AppState;
 
 pub fn api_router() -> Router<AppState> {
@@ -13,18 +14,35 @@ pub fn api_router() -> Router<AppState> {
 struct HealthResponse {
     status: &'static str,
     service: &'static str,
+    database: DatabaseHealth,
 }
 
-async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: "ok",
-        service: "marketlens-backend",
-    })
+async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthResponse>) {
+    let database = state.database().health_check().await;
+    let is_healthy = database.status == "ok";
+    let status = if is_healthy { "ok" } else { "degraded" };
+    let status_code = if is_healthy {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (
+        status_code,
+        Json(HealthResponse {
+            status,
+            service: "marketlens-backend",
+            database,
+        }),
+    )
 }
 
 #[derive(Serialize)]
 struct ConfigStatusResponse {
     database_url_configured: bool,
+    database_max_connections: u32,
+    database_connect_timeout_seconds: u64,
+    database_ssl_mode: Option<String>,
     redis_url_configured: bool,
     jwt_secret_configured: bool,
     market_data_provider_key_configured: bool,
@@ -40,6 +58,9 @@ async fn config_status(State(state): State<AppState>) -> Json<ConfigStatusRespon
 
     Json(ConfigStatusResponse {
         database_url_configured: !config.database_url.is_empty(),
+        database_max_connections: config.database_max_connections,
+        database_connect_timeout_seconds: config.database_connect_timeout_seconds,
+        database_ssl_mode: config.database_ssl_mode.clone(),
         redis_url_configured: !config.redis_url.is_empty(),
         jwt_secret_configured: !config.jwt_secret.is_empty(),
         market_data_provider_key_configured: !config.market_data_provider_key.is_empty(),
