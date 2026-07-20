@@ -1,7 +1,9 @@
 target/
 node_modules/
+frontend/dist/
 .gh_token
 .database_url
+.env.production
 .task_id
 .container_name
 .app_name

@@ -1,0 +1,82 @@
+use std::{env, net::SocketAddr};
+
+use thiserror::Error;
+
+#[derive(Clone, Debug)]
+pub struct AppConfig {
+    pub host: String,
+    pub port: u16,
+    pub database_url: String,
+    pub redis_url: String,
+    pub jwt_secret: String,
+    pub market_data_provider_key: String,
+    pub news_provider_key: String,
+    pub mctai_auth_url: String,
+    pub mctai_auth_app_token: String,
+    pub mctai_auth_jwks_url: String,
+    pub mctai_email_url: Option<String>,
+    pub mctai_email_app_token: Option<String>,
+    pub self_url: Option<String>,
+    pub allowed_cors_origin: Option<String>,
+}
+
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("missing required environment variable {0}")]
+    Missing(&'static str),
+    #[error("PORT must be a valid u16: {0}")]
+    InvalidPort(#[from] std::num::ParseIntError),
+    #[error("HOST and PORT must form a valid socket address: {0}")]
+    InvalidSocketAddress(#[from] std::net::AddrParseError),
+}
+
+impl AppConfig {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        dotenvy::dotenv().ok();
+
+        Ok(Self {
+            host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_owned()),
+            port: optional_env("PORT")?
+                .map(|value| value.parse::<u16>())
+                .transpose()?
+                .unwrap_or(8080),
+            database_url: required_env("DATABASE_URL")?,
+            redis_url: required_env("REDIS_URL")?,
+            jwt_secret: required_env("JWT_SECRET")?,
+            market_data_provider_key: required_env("MARKET_DATA_PROVIDER_KEY")?,
+            news_provider_key: required_env("NEWS_PROVIDER_KEY")?,
+            mctai_auth_url: required_env("MCTAI_AUTH_URL")?,
+            mctai_auth_app_token: required_env("MCTAI_AUTH_APP_TOKEN")?,
+            mctai_auth_jwks_url: required_env("MCTAI_AUTH_JWKS_URL")?,
+            mctai_email_url: optional_env("MCTAI_EMAIL_URL")?,
+            mctai_email_app_token: optional_env("MCTAI_EMAIL_APP_TOKEN")?,
+            self_url: optional_env("SELF_URL")?,
+            allowed_cors_origin: optional_env("ALLOWED_CORS_ORIGIN")?,
+        })
+    }
+
+    pub fn socket_addr(&self) -> Result<SocketAddr, ConfigError> {
+        format!("{}:{}", self.host, self.port)
+            .parse()
+            .map_err(ConfigError::from)
+    }
+}
+
+fn required_env(name: &'static str) -> Result<String, ConfigError> {
+    env::var(name)
+        .map(|value| value.trim().to_owned())
+        .ok()
+        .filter(|value| !value.is_empty())
+        .ok_or(ConfigError::Missing(name))
+}
+
+fn optional_env(name: &'static str) -> Result<Option<String>, ConfigError> {
+    match env::var(name) {
+        Ok(value) => {
+            let trimmed = value.trim().to_owned();
+            Ok((!trimmed.is_empty()).then_some(trimmed))
+        }
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(ConfigError::Missing(name)),
+    }
+}
