@@ -5,6 +5,7 @@ mod email;
 mod market_data;
 mod redis;
 mod routes;
+mod series;
 mod state;
 mod users;
 mod ws;
