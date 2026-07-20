@@ -1,11 +1,13 @@
 mod config;
 mod db;
+mod redis;
 mod routes;
 mod state;
 
 use axum::Router;
 use config::AppConfig;
 use db::Database;
+use redis::RedisClient;
 use state::AppState;
 use tokio::net::TcpListener;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -19,7 +21,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = config.socket_addr()?;
     let database = Database::connect(&config).await?;
     database.run_migrations().await?;
-    let state = AppState::new(config, database);
+    let redis = RedisClient::connect(&config)?;
+    let state = AppState::new(config, database, redis);
     let app = app(state);
     let listener = TcpListener::bind(addr).await?;
 

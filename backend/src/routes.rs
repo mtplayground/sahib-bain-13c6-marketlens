@@ -2,6 +2,7 @@ use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
 use serde::Serialize;
 
 use crate::db::DatabaseHealth;
+use crate::redis::{channels, RedisHealth};
 use crate::state::AppState;
 
 pub fn api_router() -> Router<AppState> {
@@ -15,11 +16,13 @@ struct HealthResponse {
     status: &'static str,
     service: &'static str,
     database: DatabaseHealth,
+    redis: RedisHealth,
 }
 
 async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthResponse>) {
     let database = state.database().health_check().await;
-    let is_healthy = database.status == "ok";
+    let redis = state.redis().health_check().await;
+    let is_healthy = database.status == "ok" && redis.status == "ok";
     let status = if is_healthy { "ok" } else { "degraded" };
     let status_code = if is_healthy {
         StatusCode::OK
@@ -33,6 +36,7 @@ async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthRespon
             status,
             service: "marketlens-backend",
             database,
+            redis,
         }),
     )
 }
@@ -51,6 +55,17 @@ struct ConfigStatusResponse {
     email_configured: bool,
     self_url_configured: bool,
     allowed_cors_origin_configured: bool,
+    redis_channels: RedisChannelsResponse,
+}
+
+#[derive(Serialize)]
+struct RedisChannelsResponse {
+    namespace: &'static str,
+    market_ticks_pattern: &'static str,
+    market_ticks_example: String,
+    alert_events: &'static str,
+    user_alert_events_pattern: &'static str,
+    user_alert_events_example: String,
 }
 
 async fn config_status(State(state): State<AppState>) -> Json<ConfigStatusResponse> {
@@ -72,5 +87,13 @@ async fn config_status(State(state): State<AppState>) -> Json<ConfigStatusRespon
             && config.mctai_email_app_token.is_some(),
         self_url_configured: config.self_url.is_some(),
         allowed_cors_origin_configured: config.allowed_cors_origin.is_some(),
+        redis_channels: RedisChannelsResponse {
+            namespace: channels::NAMESPACE,
+            market_ticks_pattern: channels::MARKET_TICKS_PATTERN,
+            market_ticks_example: channels::market_ticks("BTC/USD"),
+            alert_events: channels::ALERT_EVENTS,
+            user_alert_events_pattern: channels::USER_ALERT_EVENTS_PATTERN,
+            user_alert_events_example: channels::user_alert_events("user-sub"),
+        },
     })
 }

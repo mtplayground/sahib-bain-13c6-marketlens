@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::config::AppConfig;
 use crate::db::Database;
+use crate::redis::RedisClient;
 
 #[derive(Clone, Debug)]
 pub struct AppState {
@@ -12,12 +13,17 @@ pub struct AppState {
 struct AppStateInner {
     config: AppConfig,
     database: Database,
+    redis: RedisClient,
 }
 
 impl AppState {
-    pub fn new(config: AppConfig, database: Database) -> Self {
+    pub fn new(config: AppConfig, database: Database, redis: RedisClient) -> Self {
         Self {
-            inner: Arc::new(AppStateInner { config, database }),
+            inner: Arc::new(AppStateInner {
+                config,
+                database,
+                redis,
+            }),
         }
     }
 
@@ -27,5 +33,9 @@ impl AppState {
 
     pub fn database(&self) -> &Database {
         &self.inner.database
+    }
+
+    pub fn redis(&self) -> &RedisClient {
+        &self.inner.redis
     }
 }
