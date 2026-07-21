@@ -82,6 +82,61 @@ export type PopularInstrumentsResponse = {
   results: PopularInstrumentEntry[];
 };
 
+export type TimeframeInterval = '1m' | '5m' | '1h';
+
+export type TimeframePoint = {
+  observed_at: string;
+  open_price: string | null;
+  high_price: string | null;
+  low_price: string | null;
+  close_price: string;
+  volume: string | null;
+  trade_count: number | null;
+  vwap: string | null;
+  is_final: boolean;
+  provider_updated_at: string | null;
+  ingested_at: string;
+};
+
+export type TimeframeSeriesSummary = {
+  id: number;
+  provider: string;
+  provider_instrument_id: string;
+  symbol: string;
+  asset_class: string;
+  interval: string;
+  currency: string | null;
+  first_observed_at: string | null;
+  last_observed_at: string | null;
+  last_refreshed_at: string | null;
+  source_updated_at: string | null;
+};
+
+export type TimeframeSeriesResponse = {
+  query: {
+    instrument_id: number | null;
+    symbol: string | null;
+    provider: string | null;
+    interval: string;
+    from: string | null;
+    to: string | null;
+    limit: number;
+  };
+  count: number;
+  series: TimeframeSeriesSummary;
+  points: TimeframePoint[];
+};
+
+export type TimeframeSeriesQuery = {
+  symbol?: string;
+  instrumentId?: number;
+  provider?: string;
+  interval?: TimeframeInterval;
+  from?: string;
+  to?: string;
+  limit?: number;
+};
+
 export type InstrumentDiscoveryFilters = {
   query: string;
   assetType: AssetType;
@@ -146,6 +201,27 @@ export async function loadMostPopular(limit = 5): Promise<PopularInstrumentsResp
   params.set('limit', String(limit));
 
   return fetchJson<PopularInstrumentsResponse>(`/api/v1/instruments/popular?${params.toString()}`);
+}
+
+export async function loadTimeframeSeries(
+  query: TimeframeSeriesQuery
+): Promise<TimeframeSeriesResponse> {
+  const params = new URLSearchParams();
+  if (query.symbol) {
+    params.set('symbol', query.symbol);
+  }
+  if (query.instrumentId) {
+    params.set('instrument_id', String(query.instrumentId));
+  }
+  if (query.provider) {
+    params.set('provider', query.provider);
+  }
+  params.set('interval', query.interval ?? '1m');
+  params.set('limit', String(query.limit ?? 120));
+  appendIfPresent(params, 'from', query.from ?? '');
+  appendIfPresent(params, 'to', query.to ?? '');
+
+  return fetchJson<TimeframeSeriesResponse>(`/api/v1/series/timeframe?${params.toString()}`);
 }
 
 async function fetchJson<T>(path: string): Promise<T> {
