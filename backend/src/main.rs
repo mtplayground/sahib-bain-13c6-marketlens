@@ -1,4 +1,5 @@
 mod analytics;
+mod alert_evaluation;
 mod alerts;
 mod auth;
 mod config;
@@ -39,6 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect(&config).await?;
     database.run_migrations().await?;
     let redis = RedisClient::connect(&config)?;
+    alert_evaluation::spawn_worker(database.clone(), redis.clone());
     let state = AppState::new(config, database, redis);
     let app = app(state);
     let listener = TcpListener::bind(addr).await?;
