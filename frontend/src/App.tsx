@@ -1,13 +1,19 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  BarChart3,
   CheckCircle2,
   CircleAlert,
   KeyRound,
+  ListFilter,
   LogIn,
   MailCheck,
   RadioTower,
   RefreshCw,
+  Search as SearchIcon,
   ShieldCheck,
+  SlidersHorizontal,
+  Target,
+  TrendingUp,
   UserPlus,
   Wifi,
   WifiOff
@@ -15,6 +21,13 @@ import {
 import './App.css';
 import { AppShell } from './components/AppShell';
 import { Panel } from './components/Panel';
+import {
+  filterInstruments,
+  searchInstruments,
+  type AssetType,
+  type InstrumentCandidate,
+  type InstrumentDiscoveryFilters
+} from './instruments';
 import {
   useRealtimeMarketData,
   type RealtimeConnectionState,
@@ -53,6 +66,22 @@ const initialSessionState: SessionState = {
 };
 
 const realtimeSymbols = ['SPY', 'BTC/USD', 'NVDA', 'ETH/USD', 'VIX'];
+
+const defaultDiscoveryFilters: InstrumentDiscoveryFilters = {
+  query: '',
+  assetType: '',
+  region: '',
+  minPrice: '',
+  maxPrice: '',
+  limit: 25
+};
+
+const assetTypeOptions: Array<{ value: AssetType; label: string }> = [
+  { value: '', label: 'All assets' },
+  { value: 'equity', label: 'Equities' },
+  { value: 'corporate_bond', label: 'Corporate bonds' },
+  { value: 'government_bond', label: 'Government bonds' }
+];
 
 export function App() {
   const [sessionState, setSessionState] = useState<SessionState>(initialSessionState);
@@ -302,6 +331,19 @@ function AuthenticatedDashboard({
   verificationState: VerificationState;
   onSendVerification: () => void;
 }) {
+  const [chartCandidates, setChartCandidates] = useState<InstrumentCandidate[]>([]);
+  const [activeInstrument, setActiveInstrument] = useState<InstrumentCandidate | null>(null);
+  const candidateSymbols = useMemo(
+    () => chartCandidates.map((candidate) => candidate.canonical_symbol),
+    [chartCandidates]
+  );
+  const handleCandidatesChange = useCallback((candidates: InstrumentCandidate[]) => {
+    setChartCandidates(candidates);
+  }, []);
+  const handleActiveInstrumentChange = useCallback((instrument: InstrumentCandidate | null) => {
+    setActiveInstrument(instrument);
+  }, []);
+
   return (
     <section className="dashboard-grid" aria-label="Authenticated workspace">
       <Panel title="Session Console" eyebrow="SIGNED IN" tone="accent">
@@ -332,31 +374,304 @@ function AuthenticatedDashboard({
         />
       </Panel>
 
-      <Panel title="Protected Route Contract" eyebrow="SESSION STORE" className="dashboard-grid__wide">
-        <div className="signal-stack">
-          <div>
-            <strong>HTTP routes</strong>
-            <span>Protected frontend calls include browser credentials and rely on the signed session cookie.</span>
-          </div>
-          <div>
-            <strong>Refresh flow</strong>
-            <span>Session renewal redirects through the platform auth endpoint instead of creating an app token.</span>
-          </div>
-          <div>
-            <strong>Verification</strong>
-            <span>Email confirmation updates the app-owned user profile in Postgres.</span>
-          </div>
-        </div>
-      </Panel>
+      <MarketDiscovery
+        candidates={chartCandidates}
+        activeInstrument={activeInstrument}
+        onCandidatesChange={handleCandidatesChange}
+        onActiveInstrumentChange={handleActiveInstrumentChange}
+      />
 
-      <RealtimeConsole />
+      <RealtimeConsole candidateSymbols={candidateSymbols} />
     </section>
   );
 }
 
-function RealtimeConsole() {
+type DiscoveryRequestState =
+  | { status: 'loading'; message: string }
+  | { status: 'ready'; message: string }
+  | { status: 'error'; message: string };
+
+function MarketDiscovery({
+  candidates,
+  activeInstrument,
+  onCandidatesChange,
+  onActiveInstrumentChange
+}: {
+  candidates: InstrumentCandidate[];
+  activeInstrument: InstrumentCandidate | null;
+  onCandidatesChange: (candidates: InstrumentCandidate[]) => void;
+  onActiveInstrumentChange: (instrument: InstrumentCandidate | null) => void;
+}) {
+  const [filters, setFilters] = useState<InstrumentDiscoveryFilters>(defaultDiscoveryFilters);
+  const [requestState, setRequestState] = useState<DiscoveryRequestState>({
+    status: 'loading',
+    message: 'Loading catalog'
+  });
+  const query = filters.query.trim();
+
+  useEffect(() => {
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      setRequestState({
+        status: 'loading',
+        message: query ? 'Searching catalog' : 'Filtering catalog'
+      });
+
+      const request = query ? searchInstruments(filters) : filterInstruments(filters);
+      request
+        .then((response) => {
+          if (cancelled) {
+            return;
+          }
+          onCandidatesChange(response.results);
+          onActiveInstrumentChange(response.results[0] ?? null);
+          setRequestState({
+            status: 'ready',
+            message: `${response.count} candidates`
+          });
+        })
+        .catch((error) => {
+          if (cancelled) {
+            return;
+          }
+          onCandidatesChange([]);
+          onActiveInstrumentChange(null);
+          setRequestState({
+            status: 'error',
+            message: error instanceof Error ? error.message : 'Instrument discovery failed'
+          });
+        });
+    }, 260);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [filters, onActiveInstrumentChange, onCandidatesChange, query]);
+
+  function updateFilter<Key extends keyof InstrumentDiscoveryFilters>(
+    key: Key,
+    value: InstrumentDiscoveryFilters[Key]
+  ) {
+    setFilters((current) => ({ ...current, [key]: value }));
+  }
+
+  function clearFilters() {
+    setFilters(defaultDiscoveryFilters);
+  }
+
+  return (
+    <Panel
+      title="Market Discovery"
+      eyebrow="SEARCH + FILTER"
+      className="dashboard-grid__wide"
+      actions={<DiscoveryStatusPill state={requestState} />}
+    >
+      <div className="discovery-grid">
+        <aside className="filter-sidebar" aria-label="Instrument filters">
+          <label className="field-stack">
+            <span>Search</span>
+            <div className="terminal-input-shell">
+              <SearchIcon size={16} />
+              <input
+                type="search"
+                value={filters.query}
+                onChange={(event) => updateFilter('query', event.target.value)}
+                placeholder="Symbol, issuer, identifier"
+              />
+            </div>
+          </label>
+
+          <label className="field-stack">
+            <span>Asset type</span>
+            <select
+              value={filters.assetType}
+              onChange={(event) => updateFilter('assetType', event.target.value as AssetType)}
+            >
+              {assetTypeOptions.map((option) => (
+                <option key={option.value || 'all'} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="field-stack">
+            <span>Region</span>
+            <input
+              value={filters.region}
+              onChange={(event) => updateFilter('region', event.target.value)}
+              placeholder="US, EU, APAC"
+            />
+          </label>
+
+          <div className="price-range" aria-label="Price range">
+            <label className="field-stack">
+              <span>Min price</span>
+              <input
+                inputMode="decimal"
+                value={filters.minPrice}
+                onChange={(event) => updateFilter('minPrice', event.target.value)}
+                placeholder="0.00"
+              />
+            </label>
+            <label className="field-stack">
+              <span>Max price</span>
+              <input
+                inputMode="decimal"
+                value={filters.maxPrice}
+                onChange={(event) => updateFilter('maxPrice', event.target.value)}
+                placeholder="999.00"
+              />
+            </label>
+          </div>
+
+          <button className="terminal-button" type="button" onClick={clearFilters}>
+            <SlidersHorizontal size={18} />
+            <span>Reset filters</span>
+          </button>
+        </aside>
+
+        <div className="candidate-panel" aria-label="Chart candidates">
+          <div className="candidate-panel__header">
+            <div>
+              <strong>Chart candidates</strong>
+              <span>{discoverySummary(filters, candidates.length)}</span>
+            </div>
+            <ListFilter size={18} aria-hidden="true" />
+          </div>
+          <CandidateRows
+            candidates={candidates}
+            activeInstrument={activeInstrument}
+            onSelect={onActiveInstrumentChange}
+          />
+        </div>
+
+        <div className="instrument-panel" aria-label="Selected dashboard instrument">
+          {activeInstrument ? (
+            <InstrumentDashboard instrument={activeInstrument} />
+          ) : (
+            <EmptyInstrumentPanel />
+          )}
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+function DiscoveryStatusPill({ state }: { state: DiscoveryRequestState }) {
+  const tone = state.status === 'error' ? 'error' : state.status === 'loading' ? 'fallback' : 'open';
+  return (
+    <span className={`auth-pill auth-pill--${tone}`}>
+      {state.status === 'loading' ? <RefreshCw size={14} /> : <Target size={14} />}
+      {state.message}
+    </span>
+  );
+}
+
+function CandidateRows({
+  candidates,
+  activeInstrument,
+  onSelect
+}: {
+  candidates: InstrumentCandidate[];
+  activeInstrument: InstrumentCandidate | null;
+  onSelect: (instrument: InstrumentCandidate) => void;
+}) {
+  if (candidates.length === 0) {
+    return (
+      <div className="candidate-empty">
+        <SearchIcon size={20} />
+        <span>No matching instruments.</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="candidate-table">
+      <div className="candidate-table__head" aria-hidden="true">
+        <span>Symbol</span>
+        <span>Asset</span>
+        <span>Region</span>
+        <span>Price</span>
+      </div>
+      {candidates.map((candidate) => {
+        const selected = activeInstrument?.id === candidate.id;
+        return (
+          <button
+            className={selected ? 'candidate-row is-selected' : 'candidate-row'}
+            key={candidate.id}
+            type="button"
+            onClick={() => onSelect(candidate)}
+            aria-pressed={selected}
+          >
+            <span>
+              <strong>{candidate.canonical_symbol}</strong>
+              <small>{candidate.display_name}</small>
+            </span>
+            <span>{assetTypeLabel(candidate.asset_class)}</span>
+            <span>{candidate.region}</span>
+            <span>{formatLatestPrice(candidate)}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function InstrumentDashboard({ instrument }: { instrument: InstrumentCandidate }) {
+  const latestPrice = instrument.latest_price;
+  const bars = chartBars(instrument);
+
+  return (
+    <div className="instrument-dashboard">
+      <div className="instrument-dashboard__title">
+        <div>
+          <span>{assetTypeLabel(instrument.asset_class)}</span>
+          <h3>{instrument.canonical_symbol}</h3>
+        </div>
+        <BarChart3 size={22} aria-hidden="true" />
+      </div>
+      <p>{instrument.display_name}</p>
+
+      <div className="instrument-metrics">
+        <ContractItem label="Region" value={instrument.region} />
+        <ContractItem label="Issuer" value={instrument.issuer_name || '-'} />
+        <ContractItem label="Exchange" value={instrument.exchange || '-'} />
+        <ContractItem label="Status" value={instrument.status} />
+      </div>
+
+      <div className="mini-chart" aria-label={`${instrument.canonical_symbol} chart preview`}>
+        {bars.map((height, index) => (
+          <span key={`${instrument.id}-${index}`} style={{ height: `${height}%` }} />
+        ))}
+      </div>
+
+      <div className="price-strip">
+        <TrendingUp size={18} />
+        <strong>{latestPrice ? formatLatestPrice(instrument) : 'No cached price'}</strong>
+        <span>{latestPrice ? formatTimestamp(latestPrice.observed_at) : 'Awaiting series data'}</span>
+      </div>
+    </div>
+  );
+}
+
+function EmptyInstrumentPanel() {
+  return (
+    <div className="candidate-empty candidate-empty--tall">
+      <Target size={24} />
+      <span>No active instrument selected.</span>
+    </div>
+  );
+}
+
+function RealtimeConsole({ candidateSymbols }: { candidateSymbols: string[] }) {
   const [selectedSymbols, setSelectedSymbols] = useState(['SPY', 'BTC/USD']);
   const realtime = useRealtimeMarketData(selectedSymbols);
+  const controlSymbols = useMemo(
+    () => uniqueSymbols([...candidateSymbols, ...realtimeSymbols]).slice(0, 12),
+    [candidateSymbols]
+  );
 
   function toggleSymbol(symbol: string) {
     setSelectedSymbols((current) =>
@@ -375,7 +690,7 @@ function RealtimeConsole() {
     >
       <div className="realtime-console">
         <div className="realtime-console__controls" aria-label="Realtime instruments">
-          {realtimeSymbols.map((symbol) => {
+          {controlSymbols.map((symbol) => {
             const selected = selectedSymbols.includes(symbol);
             return (
               <button
@@ -607,6 +922,62 @@ function ContractItem({ label, value }: { label: string; value: string }) {
       <strong>{value}</strong>
     </div>
   );
+}
+
+function discoverySummary(filters: InstrumentDiscoveryFilters, count: number) {
+  const mode = filters.query.trim() ? 'search' : 'filter';
+  const pieces = [
+    filters.assetType ? assetTypeLabel(filters.assetType) : 'all assets',
+    filters.region.trim() ? filters.region.trim().toUpperCase() : 'all regions'
+  ];
+  return `${count} ${mode} matches across ${pieces.join(' / ')}`;
+}
+
+function assetTypeLabel(value: string) {
+  if (value === 'corporate_bond') {
+    return 'Corporate bond';
+  }
+  if (value === 'government_bond') {
+    return 'Government bond';
+  }
+  if (value === 'equity') {
+    return 'Equity';
+  }
+  return value || 'All assets';
+}
+
+function formatLatestPrice(candidate: InstrumentCandidate) {
+  const latestPrice = candidate.latest_price;
+  if (!latestPrice) {
+    return '-';
+  }
+
+  const price = Number(latestPrice.close_price);
+  const renderedPrice = Number.isFinite(price)
+    ? price.toLocaleString(undefined, { maximumFractionDigits: 4 })
+    : latestPrice.close_price;
+  return `${latestPrice.currency || candidate.currency || ''} ${renderedPrice}`.trim();
+}
+
+function chartBars(instrument: InstrumentCandidate) {
+  const seed = [...instrument.canonical_symbol].reduce(
+    (sum, character) => sum + character.charCodeAt(0),
+    instrument.id
+  );
+  return Array.from({ length: 18 }, (_, index) => 22 + ((seed + index * 17) % 68));
+}
+
+function uniqueSymbols(symbols: string[]) {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const symbol of symbols) {
+    const normalized = symbol.trim();
+    if (normalized && !seen.has(normalized)) {
+      seen.add(normalized);
+      unique.push(normalized);
+    }
+  }
+  return unique;
 }
 
 function deliveryMessage(delivery: VerificationSendResult['delivery']) {
