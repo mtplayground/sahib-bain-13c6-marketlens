@@ -278,7 +278,10 @@ impl HttpMarketDataProvider {
             base_url,
             api_key,
             timeout,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(timeout)
+                .build()
+                .map_err(MarketDataError::Client)?,
         })
     }
 
@@ -361,6 +364,8 @@ pub enum MarketDataError {
     InvalidBaseUrl(#[source] url::ParseError),
     #[error("market data request timed out")]
     Timeout,
+    #[error("failed to configure market data HTTP client: {0}")]
+    Client(#[source] reqwest::Error),
     #[error("market data request failed: {0}")]
     Request(#[source] reqwest::Error),
     #[error("market data provider returned {status}: {body}")]

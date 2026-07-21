@@ -255,7 +255,28 @@ async fn handle_client_text(
             subscription_id,
             topic,
         } => {
-            let resolved = topic.resolve(&claims.sub);
+            let subscription_id = subscription_id.trim().to_owned();
+            if subscription_id.is_empty() {
+                return send_error(
+                    sender,
+                    request_id,
+                    "invalid_subscription",
+                    "subscription_id cannot be empty",
+                )
+                .await;
+            }
+            let resolved = match topic.resolve(&claims.sub) {
+                Ok(resolved) => resolved,
+                Err(message) => {
+                    return send_error(
+                        sender,
+                        request_id,
+                        "invalid_subscription",
+                        message,
+                    )
+                    .await;
+                }
+            };
             subscriptions.insert(
                 subscription_id.clone(),
                 ActiveSubscription {
@@ -405,14 +426,19 @@ enum SubscriptionTopic {
 }
 
 impl SubscriptionTopic {
-    fn resolve(&self, user_sub: &str) -> ResolvedSubscription {
+    fn resolve(&self, user_sub: &str) -> Result<ResolvedSubscription, &'static str> {
         match self {
-            Self::MarketTicks { instrument_symbol } => ResolvedSubscription {
-                redis_channel: channels::market_ticks(instrument_symbol),
-            },
-            Self::AlertEvents => ResolvedSubscription {
+            Self::MarketTicks { instrument_symbol } => {
+                if instrument_symbol.trim().is_empty() {
+                    return Err("instrument_symbol cannot be empty for market tick subscriptions");
+                }
+                Ok(ResolvedSubscription {
+                    redis_channel: channels::market_ticks(instrument_symbol),
+                })
+            }
+            Self::AlertEvents => Ok(ResolvedSubscription {
                 redis_channel: channels::user_alert_events(user_sub),
-            },
+            }),
         }
     }
 }
@@ -560,5 +586,14 @@ mod tests {
         assert!(
             matching_subscription_ids(&subscriptions, "marketlens:market:ticks:iwm").is_empty()
         );
+    }
+
+    #[test]
+    fn rejects_blank_market_tick_subscription_symbol() {
+        let topic = SubscriptionTopic::MarketTicks {
+            instrument_symbol: " ".to_owned(),
+        };
+
+        assert!(topic.resolve("user-1").is_err());
     }
 }

@@ -192,7 +192,10 @@ impl HttpNewsProvider {
             base_url,
             api_key: normalize_required(api_key.into(), "NEWS_PROVIDER_KEY")?,
             timeout,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(timeout)
+                .build()
+                .map_err(NewsError::Client)?,
         })
     }
 
@@ -757,6 +760,8 @@ pub enum NewsError {
     UnsupportedUrlScheme { field: &'static str },
     #[error("news request timed out")]
     Timeout,
+    #[error("failed to configure news HTTP client: {0}")]
+    Client(#[source] reqwest::Error),
     #[error("news request failed: {0}")]
     Request(#[source] reqwest::Error),
     #[error("news provider returned {status}: {body}")]
