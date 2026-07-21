@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use std::{cmp, time::Duration};
+
 use chrono::{DateTime, Utc};
 use rust_decimal::{prelude::FromPrimitive, Decimal};
 use serde::{Deserialize, Serialize};
@@ -8,10 +10,13 @@ use thiserror::Error;
 use crate::{
     config::AppConfig,
     db::Database,
-    instruments::{live_seed_catalog_entries, InstrumentModelError, NewInstrument, NewInstrumentIdentifier},
+    instruments::{
+        live_seed_catalog_entries, InstrumentIdentifierType, InstrumentModelError, NewInstrument,
+        NewInstrumentIdentifier, SeedInstrumentCatalogEntry,
+    },
     market_data::{
-        AssetClass, LatestQuoteRequest, MarketDataError, MarketDataProvider, MarketQuote,
-        ProviderInstrumentRef,
+        AssetClass, ConfiguredMarketDataProvider, LatestQuoteRequest, MarketDataError,
+        MarketDataProvider, MarketQuote, ProviderInstrumentRef,
     },
     redis::{RedisClient, RedisError},
     series::{NewPriceSeries, NewPriceSeriesPoint, SeriesInterval, SeriesModelError},
@@ -86,8 +91,10 @@ pub async fn seed_live_instrument_catalog(
     database: &Database,
     config: &AppConfig,
 ) -> Result<InstrumentCatalogSeedReport, IngestionError> {
-    let entries =
-        live_seed_catalog_entries(config.live_market_provider_name.as_str(), &config.live_market_symbols)?;
+    let entries = live_seed_catalog_entries(
+        config.live_market_provider_name.as_str(),
+        &config.live_market_symbols,
+    )?;
     let requested = entries.len();
     let mut upserted_instruments = 0_usize;
     let mut upserted_identifiers = 0_usize;
@@ -107,6 +114,136 @@ pub async fn seed_live_instrument_catalog(
         upserted_instruments,
         upserted_identifiers,
     })
+}
+
+pub fn spawn_live_market_worker(
+    config: AppConfig,
+    database: Database,
+    redis: RedisClient,
+) -> Result<(), IngestionError> {
+    if !config.live_market_ingestion_enabled {
+        tracing::info!(
+            provider = %config.live_market_provider_name,
+            symbols = ?config.live_market_symbols,
+            "live market ingestion worker disabled"
+        );
+        return Ok(());
+    }
+
+    let entries = live_seed_catalog_entries(
+        config.live_market_provider_name.as_str(),
+        &config.live_market_symbols,
+    )?;
+    let batch = live_ingestion_batch(&entries)?;
+    let provider = ConfiguredMarketDataProvider::from_config(&config)?;
+    let poll_interval = Duration::from_secs(config.live_market_poll_interval_seconds);
+    let worker = IngestionWorker::new(provider, database, redis);
+
+    tracing::info!(
+        provider = %config.live_market_provider_name,
+        symbols = ?config.live_market_symbols,
+        poll_interval_seconds = config.live_market_poll_interval_seconds,
+        "starting live market ingestion worker"
+    );
+
+    tokio::spawn(async move {
+        run_live_market_loop(worker, batch, poll_interval).await;
+    });
+
+    Ok(())
+}
+
+async fn run_live_market_loop<P>(
+    worker: IngestionWorker<P>,
+    batch: IngestionBatch,
+    poll_interval: Duration,
+) where
+    P: MarketDataProvider,
+{
+    let mut consecutive_failures = 0_u32;
+
+    loop {
+        let started_at = std::time::Instant::now();
+        match worker.run_once(batch.clone()).await {
+            Ok(report) => {
+                consecutive_failures = 0;
+                tracing::info!(
+                    provider = %worker.provider.name(),
+                    requested = report.requested,
+                    persisted = report.persisted,
+                    published = report.published,
+                    redis_subscribers = report.redis_subscribers,
+                    elapsed_ms = started_at.elapsed().as_millis(),
+                    "completed live market ingestion poll"
+                );
+                tokio::time::sleep(poll_interval).await;
+            }
+            Err(error) => {
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                let retry_delay = live_retry_delay(&error, poll_interval, consecutive_failures);
+                tracing::warn!(
+                    provider = %worker.provider.name(),
+                    error = %error,
+                    consecutive_failures,
+                    retry_delay_seconds = retry_delay.as_secs(),
+                    "live market ingestion poll failed; retrying"
+                );
+                tokio::time::sleep(retry_delay).await;
+            }
+        }
+    }
+}
+
+fn live_ingestion_batch(
+    entries: &[SeedInstrumentCatalogEntry],
+) -> Result<IngestionBatch, IngestionError> {
+    IngestionBatch::new(
+        entries
+            .iter()
+            .map(|entry| {
+                let provider_id = entry
+                    .identifiers
+                    .iter()
+                    .find(|identifier| {
+                        identifier.identifier_type == InstrumentIdentifierType::ProviderId
+                            && identifier.is_primary
+                    })
+                    .or_else(|| {
+                        entry.identifiers.iter().find(|identifier| {
+                            identifier.identifier_type == InstrumentIdentifierType::ProviderId
+                        })
+                    })
+                    .map(|identifier| identifier.identifier_value.clone())
+                    .unwrap_or_else(|| entry.instrument.canonical_symbol.clone());
+
+                IngestionInstrument::new(
+                    provider_id,
+                    entry.instrument.canonical_symbol.clone(),
+                    entry.instrument.asset_class.clone(),
+                    SeriesInterval::Tick,
+                    entry.instrument.currency.clone(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    )
+}
+
+fn live_retry_delay(error: &IngestionError, poll_interval: Duration, failures: u32) -> Duration {
+    let base_delay = match error {
+        IngestionError::Provider(MarketDataError::RateLimited { .. }) => {
+            cmp::max(Duration::from_secs(60), poll_interval)
+        }
+        IngestionError::Provider(MarketDataError::Authentication { .. }) => Duration::from_secs(300),
+        IngestionError::Provider(MarketDataError::Timeout)
+        | IngestionError::Provider(MarketDataError::Request(_))
+        | IngestionError::Provider(MarketDataError::ProviderUnavailable { .. }) => poll_interval,
+        _ => poll_interval,
+    };
+    let factor = 2_u32.saturating_pow(failures.saturating_sub(1).min(5));
+    cmp::min(
+        base_delay.saturating_mul(factor),
+        Duration::from_secs(300),
+    )
 }
 
 pub struct IngestionWorker<P> {
@@ -504,12 +641,14 @@ mod tests {
     use chrono::TimeZone;
 
     use crate::{
+        instruments::live_seed_catalog_entries,
         market_data::{AssetClass, MarketQuote, ProviderInstrumentRef},
         series::SeriesInterval,
     };
 
     use super::{
-        normalize_quote, IngestionBatch, IngestionError, IngestionInstrument,
+        live_ingestion_batch, live_retry_delay, normalize_quote, IngestionBatch, IngestionError,
+        IngestionInstrument,
     };
 
     fn as_of() -> chrono::DateTime<chrono::Utc> {
@@ -589,5 +728,45 @@ mod tests {
             normalize_quote("http-json", &instrument(), &quote),
             Err(IngestionError::InvalidNumber { field: "price" })
         ));
+    }
+
+    #[test]
+    fn builds_live_ingestion_batch_from_seed_catalog_entries() {
+        let symbols = vec!["SPY".to_owned(), "BTC/USD".to_owned()];
+        let entries = live_seed_catalog_entries("finnhub", &symbols)
+            .expect("seed entries should build");
+
+        let batch = live_ingestion_batch(&entries).expect("batch should build");
+
+        assert_eq!(batch.instruments.len(), 2);
+        assert!(batch.instruments.iter().any(|instrument| {
+            instrument.symbol == "BTC/USD"
+                && instrument.provider_id == "BINANCE:BTCUSDT"
+                && instrument.asset_class == AssetClass::Crypto
+        }));
+    }
+
+    #[test]
+    fn live_retry_delay_backs_off_rate_limits_more_than_transient_errors() {
+        let poll_interval = std::time::Duration::from_secs(5);
+        let transient = IngestionError::Provider(crate::market_data::MarketDataError::Timeout);
+        let rate_limited = IngestionError::Provider(
+            crate::market_data::MarketDataError::RateLimited {
+                body: "too many requests".to_owned(),
+            },
+        );
+
+        assert_eq!(
+            live_retry_delay(&transient, poll_interval, 1),
+            std::time::Duration::from_secs(5)
+        );
+        assert_eq!(
+            live_retry_delay(&rate_limited, poll_interval, 1),
+            std::time::Duration::from_secs(60)
+        );
+        assert_eq!(
+            live_retry_delay(&rate_limited, poll_interval, 4),
+            std::time::Duration::from_secs(300)
+        );
     }
 }
