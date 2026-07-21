@@ -12,12 +12,15 @@
   --ml-amber: #ffcf5a;
   --ml-red: #ff4f6d;
   --ml-text: #efffe8;
-  --ml-muted: #8ea087;
-  --ml-dim: #60705b;
-  --ml-shadow: 0 0 28px rgba(156, 255, 0, 0.16);
+  --ml-muted: #b9cdb2;
+  --ml-dim: #95aa8f;
+  --ml-focus-ring: #f3ff7a;
+  --ml-focus-shadow: 0 0 0 4px rgba(243, 255, 122, 0.18);
+  --ml-shadow: 0 0 28px rgba(156, 255, 0, 0.14);
   --ml-radius: 8px;
   --ml-rail-width: 15rem;
   color: var(--ml-text);
+  color-scheme: dark;
   background: var(--ml-bg);
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
@@ -48,11 +51,18 @@ button,
 input,
 select,
 textarea {
+  color: var(--ml-text);
   font: inherit;
 }
 
 button {
   border: 0;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--ml-dim);
+  opacity: 1;
 }
 
 #root {

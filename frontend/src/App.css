@@ -2933,3 +2933,14 @@
     display: none;
   }
 }
+
+:where(a[href], button, input, select, textarea, [tabindex]:not([tabindex='-1'])):focus-visible {
+  outline: 2px solid var(--ml-focus-ring);
+  outline-offset: 3px;
+  box-shadow: var(--ml-focus-shadow), var(--ml-shadow);
+}
+
+:where(button, input, select, textarea):disabled:focus-visible {
+  outline-color: var(--ml-dim);
+  box-shadow: none;
+}
