@@ -101,6 +101,53 @@ export type DeleteWatchlistItemResponse = {
   instrument_id: number;
 };
 
+export type AlertMetric = 'price' | 'volume';
+export type AlertComparator = 'above' | 'below';
+export type AlertStatus = 'active' | 'paused';
+
+export type AlertRule = {
+  id: number;
+  instrument_id: number;
+  metric: AlertMetric;
+  comparator: AlertComparator;
+  threshold: string;
+  status: AlertStatus;
+  label: string | null;
+  cooldown_seconds: number;
+  last_triggered_at: string | null;
+  created_at: string;
+  updated_at: string;
+  instrument: InstrumentSummary;
+};
+
+export type AlertRulesResponse = {
+  count: number;
+  results: AlertRule[];
+};
+
+export type AlertRuleResponse = {
+  alert_rule: AlertRule;
+};
+
+export type DeleteAlertRuleResponse = {
+  status: 'deleted';
+  alert_id: number;
+};
+
+export type AlertRuleDraft = {
+  instrumentId: number;
+  metric: AlertMetric;
+  comparator: AlertComparator;
+  threshold: string;
+  label?: string;
+  cooldownSeconds?: number;
+};
+
+export type AlertRulePatch = Partial<Omit<AlertRuleDraft, 'label'>> & {
+  status?: AlertStatus;
+  label?: string | null;
+};
+
 export type PopularInstrumentEntry = {
   instrument_id: number;
   platform_rank: number;
@@ -369,6 +416,25 @@ export async function removeWatchlistItem(
   );
 }
 
+export async function loadAlertRules(): Promise<AlertRulesResponse> {
+  return fetchJson<AlertRulesResponse>('/api/v1/alerts');
+}
+
+export async function createAlertRule(draft: AlertRuleDraft): Promise<AlertRuleResponse> {
+  return writeJson<AlertRuleResponse>('/api/v1/alerts', 'POST', alertRulePayload(draft));
+}
+
+export async function updateAlertRule(
+  alertId: number,
+  patch: AlertRulePatch
+): Promise<AlertRuleResponse> {
+  return writeJson<AlertRuleResponse>(`/api/v1/alerts/${alertId}`, 'PATCH', alertRulePayload(patch));
+}
+
+export async function deleteAlertRule(alertId: number): Promise<DeleteAlertRuleResponse> {
+  return writeJson<DeleteAlertRuleResponse>(`/api/v1/alerts/${alertId}`, 'DELETE');
+}
+
 export async function loadTimeframeSeries(
   query: TimeframeSeriesQuery
 ): Promise<TimeframeSeriesResponse> {
@@ -450,4 +516,16 @@ function appendIfPresent(params: URLSearchParams, key: string, value: string) {
   if (trimmed) {
     params.set(key, trimmed);
   }
+}
+
+function alertRulePayload(draft: AlertRulePatch) {
+  return {
+    ...(draft.instrumentId === undefined ? {} : { instrument_id: draft.instrumentId }),
+    ...(draft.metric === undefined ? {} : { metric: draft.metric }),
+    ...(draft.comparator === undefined ? {} : { comparator: draft.comparator }),
+    ...(draft.threshold === undefined ? {} : { threshold: draft.threshold }),
+    ...(draft.status === undefined ? {} : { status: draft.status }),
+    ...(draft.label === undefined ? {} : { label: draft.label === null ? null : draft.label.trim() }),
+    ...(draft.cooldownSeconds === undefined ? {} : { cooldown_seconds: draft.cooldownSeconds })
+  };
 }

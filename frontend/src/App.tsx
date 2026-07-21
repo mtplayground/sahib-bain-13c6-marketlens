@@ -33,9 +33,12 @@ import { OverlayComparisonChart } from './components/OverlayComparisonChart';
 import { Panel } from './components/Panel';
 import {
   addWatchlistItem,
+  createAlertRule,
   createWatchlist,
+  deleteAlertRule,
   deleteWatchlist,
   filterInstruments,
+  loadAlertRules,
   loadFundamentals,
   loadMostPopular,
   loadMostViewed,
@@ -44,7 +47,12 @@ import {
   recordInstrumentView,
   removeWatchlistItem,
   searchInstruments,
+  updateAlertRule,
   updateWatchlist,
+  type AlertComparator,
+  type AlertMetric,
+  type AlertRule,
+  type AlertStatus,
   type AssetType,
   type BondYieldCurvePoint,
   type CompanyFinancial,
@@ -52,6 +60,7 @@ import {
   type FundamentalsResponse,
   type InstrumentCandidate,
   type InstrumentDiscoveryFilters,
+  type InstrumentSummary,
   type KeyRatios,
   type PopularInstrumentEntry,
   type ViewHistoryEntry,
@@ -59,6 +68,7 @@ import {
 } from './instruments';
 import {
   useRealtimeMarketData,
+  type RealtimeAlertEvent,
   type RealtimeConnectionState,
   type RealtimeTickEvent
 } from './realtime';
@@ -444,6 +454,12 @@ function AuthenticatedDashboard({
         activeInstrument={activeInstrument}
         onSelectInstrument={handleOpenInstrument}
         onSetSymbols={handleSetSymbols}
+      />
+
+      <AlertsManagementPanel
+        activeInstrument={activeInstrument}
+        candidates={chartCandidates}
+        liveEvents={realtime.alertEvents}
       />
 
       <OverlayComparisonChart
@@ -1160,6 +1176,400 @@ function WatchlistStatusPill({ state }: { state: WatchlistPanelState }) {
       {state.message}
     </span>
   );
+}
+
+type AlertsPanelState =
+  | { status: 'loading'; message: string }
+  | { status: 'ready'; message: string }
+  | { status: 'saving'; message: string }
+  | { status: 'error'; message: string };
+
+type AlertFormState = {
+  instrumentId: string;
+  metric: AlertMetric;
+  comparator: AlertComparator;
+  threshold: string;
+  label: string;
+  cooldownSeconds: string;
+};
+
+const defaultAlertForm: AlertFormState = {
+  instrumentId: '',
+  metric: 'price',
+  comparator: 'above',
+  threshold: '',
+  label: '',
+  cooldownSeconds: '900'
+};
+
+function AlertsManagementPanel({
+  activeInstrument,
+  candidates,
+  liveEvents
+}: {
+  activeInstrument: InstrumentCandidate | null;
+  candidates: InstrumentCandidate[];
+  liveEvents: RealtimeAlertEvent[];
+}) {
+  const [alerts, setAlerts] = useState<AlertRule[]>([]);
+  const [editingAlertId, setEditingAlertId] = useState<number | null>(null);
+  const [form, setForm] = useState<AlertFormState>(defaultAlertForm);
+  const [state, setState] = useState<AlertsPanelState>({
+    status: 'loading',
+    message: 'Loading alerts'
+  });
+  const editingAlert = useMemo(
+    () => alerts.find((alert) => alert.id === editingAlertId) ?? null,
+    [alerts, editingAlertId]
+  );
+  const instrumentOptions = useMemo(
+    () => uniqueInstruments([
+      ...(activeInstrument ? [activeInstrument] : []),
+      ...candidates,
+      ...alerts.map((alert) => alert.instrument)
+    ]),
+    [activeInstrument, alerts, candidates]
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    setState({ status: 'loading', message: 'Loading alerts' });
+    loadAlertRules()
+      .then((response) => {
+        if (cancelled) {
+          return;
+        }
+        setAlerts(response.results);
+        setState({ status: 'ready', message: `${response.count} alert rules` });
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setAlerts([]);
+        setState({
+          status: 'error',
+          message: error instanceof Error ? error.message : 'Alerts unavailable'
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (editingAlert || form.instrumentId || !activeInstrument) {
+      return;
+    }
+    setForm((current) => ({ ...current, instrumentId: String(activeInstrument.id) }));
+  }, [activeInstrument, editingAlert, form.instrumentId]);
+
+  function replaceAlert(nextAlert: AlertRule) {
+    setAlerts((current) => {
+      const exists = current.some((alert) => alert.id === nextAlert.id);
+      return exists
+        ? current.map((alert) => (alert.id === nextAlert.id ? nextAlert : alert))
+        : [nextAlert, ...current];
+    });
+  }
+
+  function beginEdit(alert: AlertRule) {
+    setEditingAlertId(alert.id);
+    setForm({
+      instrumentId: String(alert.instrument_id),
+      metric: alert.metric,
+      comparator: alert.comparator,
+      threshold: alert.threshold,
+      label: alert.label ?? '',
+      cooldownSeconds: String(alert.cooldown_seconds)
+    });
+    setState({ status: 'ready', message: `Editing ${alert.instrument.canonical_symbol}` });
+  }
+
+  function resetForm() {
+    setEditingAlertId(null);
+    setForm({
+      ...defaultAlertForm,
+      instrumentId: activeInstrument ? String(activeInstrument.id) : ''
+    });
+  }
+
+  async function saveAlertRule() {
+    const instrumentId = Number(form.instrumentId);
+    const threshold = form.threshold.trim();
+    const cooldownSeconds = Number(form.cooldownSeconds);
+    if (!Number.isInteger(instrumentId) || instrumentId <= 0) {
+      setState({ status: 'error', message: 'Select an instrument for the alert' });
+      return;
+    }
+    if (!threshold || !Number.isFinite(Number(threshold))) {
+      setState({ status: 'error', message: 'Enter a numeric threshold' });
+      return;
+    }
+    if (!Number.isInteger(cooldownSeconds) || cooldownSeconds < 0) {
+      setState({ status: 'error', message: 'Cooldown must be zero or more seconds' });
+      return;
+    }
+
+    setState({ status: 'saving', message: editingAlert ? 'Updating alert' : 'Creating alert' });
+    try {
+      const payload = {
+        instrumentId,
+        metric: form.metric,
+        comparator: form.comparator,
+        threshold,
+        label: form.label.trim() || null,
+        cooldownSeconds
+      };
+      const response = editingAlert
+        ? await updateAlertRule(editingAlert.id, payload)
+        : await createAlertRule({ ...payload, label: payload.label ?? undefined });
+      replaceAlert(response.alert_rule);
+      resetForm();
+      setState({ status: 'ready', message: editingAlert ? 'Alert updated' : 'Alert created' });
+    } catch (error) {
+      setState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to save alert'
+      });
+    }
+  }
+
+  async function toggleAlertStatus(alert: AlertRule) {
+    const nextStatus: AlertStatus = alert.status === 'active' ? 'paused' : 'active';
+    setState({ status: 'saving', message: `${nextStatus === 'active' ? 'Resuming' : 'Pausing'} alert` });
+    try {
+      const response = await updateAlertRule(alert.id, { status: nextStatus });
+      replaceAlert(response.alert_rule);
+      setState({ status: 'ready', message: `Alert ${nextStatus}` });
+    } catch (error) {
+      setState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to update alert'
+      });
+    }
+  }
+
+  async function removeAlert(alert: AlertRule) {
+    setState({ status: 'saving', message: 'Deleting alert' });
+    try {
+      await deleteAlertRule(alert.id);
+      setAlerts((current) => current.filter((currentAlert) => currentAlert.id !== alert.id));
+      if (editingAlertId === alert.id) {
+        resetForm();
+      }
+      setState({ status: 'ready', message: 'Alert deleted' });
+    } catch (error) {
+      setState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to delete alert'
+      });
+    }
+  }
+
+  return (
+    <Panel
+      title="Alerts"
+      eyebrow="RULES + TRIGGERS"
+      className="dashboard-grid__wide"
+      actions={<AlertsStatusPill state={state} />}
+    >
+      <div className="alerts-panel">
+        <div className="alerts-layout">
+          <div className="alert-editor" aria-label="Alert rule editor">
+            <div className="alert-editor__header">
+              <strong>{editingAlert ? 'Edit alert rule' : 'Create alert rule'}</strong>
+              {editingAlert ? (
+                <button className="terminal-button" type="button" onClick={resetForm}>
+                  <X size={18} />
+                  <span>Cancel</span>
+                </button>
+              ) : null}
+            </div>
+
+            <label className="field-stack">
+              <span>Instrument</span>
+              <select
+                value={form.instrumentId}
+                onChange={(event) => setForm((current) => ({ ...current, instrumentId: event.target.value }))}
+              >
+                <option value="">Select instrument</option>
+                {instrumentOptions.map((instrument) => (
+                  <option key={instrument.id} value={instrument.id}>
+                    {instrument.canonical_symbol} - {instrument.display_name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div className="alert-segment-group" aria-label="Alert metric">
+              {(['price', 'volume'] as AlertMetric[]).map((metric) => (
+                <button
+                  className={form.metric === metric ? 'alert-segment is-selected' : 'alert-segment'}
+                  key={metric}
+                  type="button"
+                  onClick={() => setForm((current) => ({ ...current, metric }))}
+                  aria-pressed={form.metric === metric}
+                >
+                  {metric === 'price' ? <TrendingUp size={16} /> : <BarChart3 size={16} />}
+                  <span>{metric}</span>
+                </button>
+              ))}
+            </div>
+
+            <div className="alert-segment-group" aria-label="Alert comparator">
+              {(['above', 'below'] as AlertComparator[]).map((comparator) => (
+                <button
+                  className={form.comparator === comparator ? 'alert-segment is-selected' : 'alert-segment'}
+                  key={comparator}
+                  type="button"
+                  onClick={() => setForm((current) => ({ ...current, comparator }))}
+                  aria-pressed={form.comparator === comparator}
+                >
+                  <Target size={16} />
+                  <span>{comparator}</span>
+                </button>
+              ))}
+            </div>
+
+            <div className="alert-form-grid">
+              <label className="field-stack">
+                <span>Threshold</span>
+                <input
+                  value={form.threshold}
+                  onChange={(event) => setForm((current) => ({ ...current, threshold: event.target.value }))}
+                  inputMode="decimal"
+                  placeholder="425.00"
+                />
+              </label>
+              <label className="field-stack">
+                <span>Cooldown seconds</span>
+                <input
+                  value={form.cooldownSeconds}
+                  onChange={(event) => setForm((current) => ({ ...current, cooldownSeconds: event.target.value }))}
+                  inputMode="numeric"
+                  placeholder="900"
+                />
+              </label>
+            </div>
+
+            <label className="field-stack">
+              <span>Label</span>
+              <input
+                value={form.label}
+                onChange={(event) => setForm((current) => ({ ...current, label: event.target.value }))}
+                placeholder="Breakout watch"
+              />
+            </label>
+
+            <button
+              className="terminal-button terminal-button--primary"
+              type="button"
+              onClick={saveAlertRule}
+              disabled={state.status === 'saving'}
+            >
+              <Plus size={18} />
+              <span>{editingAlert ? 'Save alert' : 'Create alert'}</span>
+            </button>
+          </div>
+
+          <div className="alert-rules" aria-label="Saved alert rules">
+            {alerts.length > 0 ? (
+              alerts.map((alert) => (
+                <div className="alert-rule" key={alert.id}>
+                  <div className="alert-rule__main">
+                    <span className={`alert-status alert-status--${alert.status}`}>{alert.status}</span>
+                    <strong>{alert.label || `${alert.instrument.canonical_symbol} ${alert.metric}`}</strong>
+                    <span>
+                      {alert.instrument.canonical_symbol} {alert.metric} {alert.comparator} {formatAlertValue(alert)}
+                    </span>
+                    <small>
+                      Last trigger {timestampOrDash(alert.last_triggered_at)} / cooldown {alert.cooldown_seconds}s
+                    </small>
+                  </div>
+                  <div className="alert-rule__actions">
+                    <button className="terminal-button" type="button" onClick={() => beginEdit(alert)}>
+                      <Eye size={17} />
+                      <span>Edit</span>
+                    </button>
+                    <button className="terminal-button" type="button" onClick={() => toggleAlertStatus(alert)}>
+                      <CircleAlert size={17} />
+                      <span>{alert.status === 'active' ? 'Pause' : 'Resume'}</span>
+                    </button>
+                    <button className="terminal-button" type="button" onClick={() => removeAlert(alert)}>
+                      <Trash2 size={17} />
+                      <span>Delete</span>
+                    </button>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="watchlist-empty alert-empty">
+                <CircleAlert size={22} />
+                <span>No alert rules saved.</span>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="alert-history" aria-label="Alert trigger history">
+          <div className="alert-history__header">
+            <strong>Trigger history</strong>
+            <span>{liveEvents.length} live events</span>
+          </div>
+          {liveEvents.length > 0 ? (
+            <div className="alert-history__rows">
+              {liveEvents.map((event) => (
+                <div className="alert-history__row" key={event.id}>
+                  <span className="realtime-tape__symbol">{event.payload.symbol}</span>
+                  <span>
+                    {event.payload.label || event.payload.display_name} {event.payload.metric}{' '}
+                    {event.payload.comparator} {event.payload.threshold}; observed {event.payload.observed_value}
+                  </span>
+                  <time dateTime={event.payload.triggered_at}>{formatTimestamp(event.payload.triggered_at)}</time>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="realtime-empty">
+              <RadioTower size={20} />
+              <span>No live triggers received. Saved rules still show their last trigger timestamp.</span>
+            </div>
+          )}
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+function AlertsStatusPill({ state }: { state: AlertsPanelState }) {
+  const tone = state.status === 'error' ? 'error' : state.status === 'saving' || state.status === 'loading' ? 'fallback' : 'open';
+
+  return (
+    <span className={`auth-pill auth-pill--${tone}`}>
+      {state.status === 'loading' || state.status === 'saving' ? <RefreshCw size={14} /> : <CircleAlert size={14} />}
+      {state.message}
+    </span>
+  );
+}
+
+function uniqueInstruments(instruments: InstrumentSummary[]) {
+  const seen = new Set<number>();
+  const unique: InstrumentSummary[] = [];
+  for (const instrument of instruments) {
+    if (!seen.has(instrument.id)) {
+      seen.add(instrument.id);
+      unique.push(instrument);
+    }
+  }
+  return unique;
+}
+
+function formatAlertValue(alert: AlertRule) {
+  return alert.metric === 'price'
+    ? formatMoneyValue(alert.threshold, alert.instrument.currency)
+    : Number(alert.threshold).toLocaleString();
 }
 
 function ComparisonCountPill({ selectedCount }: { selectedCount: number }) {

@@ -31,10 +31,33 @@ export type RealtimeTickEvent = {
   payload: unknown;
 };
 
+export type RealtimeAlertEvent = {
+  id: string;
+  subscriptionId: string;
+  redisChannel: string;
+  receivedAt: string;
+  payload: {
+    type: 'alert.triggered';
+    alert_id: number;
+    trigger_id: number;
+    instrument_id: number;
+    symbol: string;
+    display_name: string;
+    metric: string;
+    comparator: string;
+    threshold: string;
+    observed_value: string;
+    label: string | null;
+    tick_observed_at: string;
+    triggered_at: string;
+  };
+};
+
 type Subscription = {
   id: string;
-  symbol: string;
-  onEvent: (event: RealtimeTickEvent) => void;
+  channel: 'market_ticks' | 'alert_events';
+  symbol: string | null;
+  onEvent: (event: RealtimeTickEvent | RealtimeAlertEvent) => void;
 };
 
 type ServerMessage =
@@ -75,7 +98,41 @@ export class MarketRealtimeClient {
 
   subscribeMarketTicks(symbol: string, onEvent: (event: RealtimeTickEvent) => void) {
     const subscriptionId = `sub-${randomId()}`;
-    this.subscriptions.set(subscriptionId, { id: subscriptionId, symbol, onEvent });
+    this.subscriptions.set(subscriptionId, {
+      id: subscriptionId,
+      channel: 'market_ticks',
+      symbol,
+      onEvent: onEvent as Subscription['onEvent']
+    });
+    this.publishState({ activeSubscriptions: this.subscriptions.size });
+    this.ensureConnected();
+    this.sendSubscribe(subscriptionId);
+
+    return () => {
+      const subscription = this.subscriptions.get(subscriptionId);
+      this.subscriptions.delete(subscriptionId);
+      this.publishState({ activeSubscriptions: this.subscriptions.size });
+      if (subscription && this.socket?.readyState === WebSocket.OPEN) {
+        this.send({
+          type: 'unsubscribe',
+          request_id: `unsub-${subscriptionId}`,
+          subscription_id: subscriptionId
+        });
+      }
+      if (this.subscriptions.size === 0) {
+        this.close();
+      }
+    };
+  }
+
+  subscribeAlertEvents(onEvent: (event: RealtimeAlertEvent) => void) {
+    const subscriptionId = `alerts-${randomId()}`;
+    this.subscriptions.set(subscriptionId, {
+      id: subscriptionId,
+      channel: 'alert_events',
+      symbol: null,
+      onEvent: onEvent as Subscription['onEvent']
+    });
     this.publishState({ activeSubscriptions: this.subscriptions.size });
     this.ensureConnected();
     this.sendSubscribe(subscriptionId);
@@ -240,6 +297,15 @@ export class MarketRealtimeClient {
     if (!subscription || this.socket?.readyState !== WebSocket.OPEN) {
       return;
     }
+    if (subscription.channel === 'alert_events') {
+      this.send({
+        type: 'subscribe',
+        request_id: `subscribe-${subscriptionId}`,
+        subscription_id: subscriptionId,
+        channel: 'alert_events'
+      });
+      return;
+    }
     this.send({
       type: 'subscribe',
       request_id: `subscribe-${subscriptionId}`,
@@ -287,7 +353,7 @@ export class MarketRealtimeClient {
       subscription.onEvent({
         id: `${subscriptionId}-${receivedAt}`,
         subscriptionId,
-        symbol: subscription.symbol,
+        symbol: subscription.symbol || 'alerts',
         redisChannel: message.redis_channel,
         receivedAt,
         payload: message.payload
@@ -368,6 +434,7 @@ export function useRealtimeMarketData(symbols: string[]) {
   const client = useMemo(() => new MarketRealtimeClient(), []);
   const [connection, setConnection] = useState<RealtimeConnectionState>(initialConnectionState);
   const [events, setEvents] = useState<RealtimeTickEvent[]>([]);
+  const [alertEvents, setAlertEvents] = useState<RealtimeAlertEvent[]>([]);
 
   useEffect(() => client.onStatus(setConnection), [client]);
 
@@ -385,11 +452,24 @@ export function useRealtimeMarketData(symbols: string[]) {
     };
   }, [client, symbols]);
 
+  useEffect(() => {
+    const unsubscribe = client.subscribeAlertEvents((event) => {
+      if (isRealtimeAlertPayload(event.payload)) {
+        setAlertEvents((current) => [event, ...current].slice(0, 20));
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [client]);
+
   useEffect(() => () => client.destroy(), [client]);
 
   return {
     connection,
     events,
+    alertEvents,
     reconnectNow: () => client.reconnectNow()
   };
 }
@@ -419,4 +499,25 @@ function randomId() {
     return crypto.randomUUID();
   }
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function isRealtimeAlertPayload(payload: unknown): payload is RealtimeAlertEvent['payload'] {
+  if (!payload || typeof payload !== 'object') {
+    return false;
+  }
+  const record = payload as Record<string, unknown>;
+  return (
+    record.type === 'alert.triggered' &&
+    typeof record.alert_id === 'number' &&
+    typeof record.trigger_id === 'number' &&
+    typeof record.instrument_id === 'number' &&
+    typeof record.symbol === 'string' &&
+    typeof record.display_name === 'string' &&
+    typeof record.metric === 'string' &&
+    typeof record.comparator === 'string' &&
+    typeof record.threshold === 'string' &&
+    typeof record.observed_value === 'string' &&
+    typeof record.tick_observed_at === 'string' &&
+    typeof record.triggered_at === 'string'
+  );
 }
