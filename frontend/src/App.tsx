@@ -18,7 +18,8 @@ import {
   TrendingUp,
   UserPlus,
   Wifi,
-  WifiOff
+  WifiOff,
+  X
 } from 'lucide-react';
 import './App.css';
 import { AppShell } from './components/AppShell';
@@ -74,6 +75,7 @@ const initialSessionState: SessionState = {
 };
 
 const realtimeSymbols = ['SPY', 'BTC/USD', 'NVDA', 'ETH/USD', 'VIX'];
+const MAX_COMPARISON_SYMBOLS = 6;
 
 const defaultDiscoveryFilters: InstrumentDiscoveryFilters = {
   query: '',
@@ -366,8 +368,11 @@ function AuthenticatedDashboard({
     setSelectedSymbols((current) =>
       current.includes(symbol)
         ? current.filter((currentSymbol) => currentSymbol !== symbol)
-        : [...current, symbol].slice(-6)
+        : [...current, symbol].slice(-MAX_COMPARISON_SYMBOLS)
     );
+  }, []);
+  const handleSetSymbols = useCallback((symbols: string[]) => {
+    setSelectedSymbols(uniqueSymbols(symbols).slice(0, MAX_COMPARISON_SYMBOLS));
   }, []);
 
   return (
@@ -406,6 +411,13 @@ function AuthenticatedDashboard({
         onCandidatesChange={handleCandidatesChange}
         onPreviewInstrument={handlePreviewInstrument}
         onOpenInstrument={handleOpenInstrument}
+      />
+
+      <InstrumentPickerPanel
+        candidates={chartCandidates}
+        selectedSymbols={selectedSymbols}
+        onSetSymbols={handleSetSymbols}
+        onToggleSymbol={handleToggleSymbol}
       />
 
       <OverlayComparisonChart
@@ -605,6 +617,179 @@ function MarketDiscovery({
         </div>
       </div>
     </Panel>
+  );
+}
+
+function InstrumentPickerPanel({
+  candidates,
+  selectedSymbols,
+  onSetSymbols,
+  onToggleSymbol
+}: {
+  candidates: InstrumentCandidate[];
+  selectedSymbols: string[];
+  onSetSymbols: (symbols: string[]) => void;
+  onToggleSymbol: (symbol: string) => void;
+}) {
+  const [pickerQuery, setPickerQuery] = useState('');
+  const candidateBySymbol = useMemo(() => {
+    const bySymbol = new Map<string, InstrumentCandidate>();
+    for (const candidate of candidates) {
+      bySymbol.set(candidate.canonical_symbol, candidate);
+    }
+    return bySymbol;
+  }, [candidates]);
+  const pickerOptions = useMemo(
+    () => uniqueSymbols([
+      ...selectedSymbols,
+      ...candidates.map((candidate) => candidate.canonical_symbol),
+      ...realtimeSymbols
+    ]),
+    [candidates, selectedSymbols]
+  );
+  const visibleOptions = useMemo(() => {
+    const query = pickerQuery.trim().toLowerCase();
+    if (!query) {
+      return pickerOptions;
+    }
+    return pickerOptions.filter((symbol) => {
+      const candidate = candidateBySymbol.get(symbol);
+      return [
+        symbol,
+        candidate?.display_name,
+        candidate?.asset_class,
+        candidate?.region,
+        candidate?.issuer_name
+      ]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query));
+    });
+  }, [candidateBySymbol, pickerOptions, pickerQuery]);
+  const canAddVisible = visibleOptions.some((symbol) => !selectedSymbols.includes(symbol));
+
+  function addVisibleOptions() {
+    onSetSymbols(uniqueSymbols([...selectedSymbols, ...visibleOptions]).slice(0, MAX_COMPARISON_SYMBOLS));
+  }
+
+  function useTopCandidates() {
+    const topSymbols = candidates
+      .map((candidate) => candidate.canonical_symbol)
+      .slice(0, MAX_COMPARISON_SYMBOLS);
+    onSetSymbols(topSymbols);
+  }
+
+  return (
+    <Panel
+      title="Instrument Picker"
+      eyebrow="COMPARE SET"
+      className="dashboard-grid__wide"
+      actions={<ComparisonCountPill selectedCount={selectedSymbols.length} />}
+    >
+      <div className="instrument-picker">
+        <div className="instrument-picker__selected" aria-label="Selected comparison instruments">
+          {selectedSymbols.length > 0 ? (
+            selectedSymbols.map((symbol) => (
+              <button
+                className="selected-symbol-chip"
+                key={symbol}
+                type="button"
+                onClick={() => onToggleSymbol(symbol)}
+                aria-label={`Remove ${symbol} from comparison`}
+              >
+                <span>{symbol}</span>
+                <X size={14} />
+              </button>
+            ))
+          ) : (
+            <span className="instrument-picker__empty-selection">No instruments selected</span>
+          )}
+          <button
+            className="terminal-button"
+            type="button"
+            onClick={() => onSetSymbols([])}
+            disabled={selectedSymbols.length === 0}
+          >
+            <X size={18} />
+            <span>Clear set</span>
+          </button>
+        </div>
+
+        <div className="instrument-picker__toolbar">
+          <label className="terminal-input-shell instrument-picker__search">
+            <SearchIcon size={16} />
+            <input
+              type="search"
+              value={pickerQuery}
+              onChange={(event) => setPickerQuery(event.target.value)}
+              placeholder="Filter overlay candidates"
+            />
+          </label>
+          <button
+            className="terminal-button"
+            type="button"
+            onClick={addVisibleOptions}
+            disabled={!canAddVisible || selectedSymbols.length >= MAX_COMPARISON_SYMBOLS}
+          >
+            <CheckCircle2 size={18} />
+            <span>Add visible</span>
+          </button>
+          <button
+            className="terminal-button"
+            type="button"
+            onClick={useTopCandidates}
+            disabled={candidates.length === 0}
+          >
+            <ListFilter size={18} />
+            <span>Use top</span>
+          </button>
+        </div>
+
+        {visibleOptions.length > 0 ? (
+          <div className="instrument-picker__grid" aria-label="Available comparison instruments">
+            {visibleOptions.map((symbol) => {
+              const candidate = candidateBySymbol.get(symbol);
+              const selected = selectedSymbols.includes(symbol);
+              const disabled = !selected && selectedSymbols.length >= MAX_COMPARISON_SYMBOLS;
+              return (
+                <button
+                  className={selected ? 'instrument-picker-option is-selected' : 'instrument-picker-option'}
+                  key={symbol}
+                  type="button"
+                  onClick={() => onToggleSymbol(symbol)}
+                  aria-pressed={selected}
+                  disabled={disabled}
+                >
+                  <span className="instrument-picker-option__mark">
+                    {selected ? <CheckCircle2 size={15} /> : <RadioTower size={15} />}
+                  </span>
+                  <span className="instrument-picker-option__body">
+                    <strong>{symbol}</strong>
+                    <small>{candidate?.display_name || 'Realtime symbol'}</small>
+                  </span>
+                  <span className="instrument-picker-option__meta">
+                    {candidate ? assetTypeLabel(candidate.asset_class) : 'Live'}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="candidate-empty">
+            <SearchIcon size={20} />
+            <span>No picker matches.</span>
+          </div>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+function ComparisonCountPill({ selectedCount }: { selectedCount: number }) {
+  return (
+    <span className="auth-pill auth-pill--open">
+      <BarChart3 size={14} />
+      {selectedCount}/{MAX_COMPARISON_SYMBOLS} selected
+    </span>
   );
 }
 
