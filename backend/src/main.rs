@@ -12,6 +12,7 @@ mod routes;
 mod series;
 mod state;
 mod users;
+mod view_history;
 mod ws;
 
 use axum::{middleware, Router};
@@ -47,6 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn app(state: AppState) -> Router {
     let protected_auth = auth::protected_router()
+        .merge(view_history::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_auth));
 
     Router::new()
