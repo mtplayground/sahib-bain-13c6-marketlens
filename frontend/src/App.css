@@ -980,7 +980,8 @@
   align-items: center;
 }
 
-.chart-view-toggle {
+.chart-view-toggle,
+.indicator-toggle-group {
   display: inline-flex;
   min-height: 2.35rem;
   overflow: hidden;
@@ -989,7 +990,13 @@
   background: rgba(7, 13, 8, 0.86);
 }
 
-.chart-view-toggle__button {
+.indicator-toggle-group {
+  border-color: rgba(77, 238, 234, 0.22);
+  background: rgba(2, 9, 10, 0.78);
+}
+
+.chart-view-toggle__button,
+.indicator-toggle {
   display: inline-flex;
   gap: 0.4rem;
   align-items: center;
@@ -1003,16 +1010,32 @@
   background: transparent;
 }
 
-.chart-view-toggle__button:last-child {
+.indicator-toggle {
+  min-width: 6.05rem;
+  border-right-color: rgba(77, 238, 234, 0.18);
+}
+
+.chart-view-toggle__button:last-child,
+.indicator-toggle:last-child {
   border-right: 0;
 }
 
 .chart-view-toggle__button:hover,
 .chart-view-toggle__button:focus-visible,
-.chart-view-toggle__button.is-selected {
+.chart-view-toggle__button.is-selected,
+.indicator-toggle:hover,
+.indicator-toggle:focus-visible,
+.indicator-toggle.is-selected {
   color: var(--ml-lime);
   outline: none;
   background: rgba(156, 255, 0, 0.1);
+}
+
+.indicator-toggle:hover,
+.indicator-toggle:focus-visible,
+.indicator-toggle.is-selected {
+  color: var(--ml-cyan);
+  background: rgba(77, 238, 234, 0.1);
 }
 
 .overlay-chart-shell {
@@ -1022,10 +1045,14 @@
   border: 1px solid rgba(77, 238, 234, 0.2);
   border-radius: var(--ml-radius);
   background:
-    linear-gradient(rgba(156, 255, 0, 0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(156, 255, 0, 0.035) 1px, transparent 1px),
-    rgba(3, 5, 3, 0.58);
+    linear-gradient(rgba(156, 255, 0, 0.052) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(77, 238, 234, 0.046) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(10, 24, 18, 0.92), rgba(3, 5, 3, 0.72));
   background-size: 100% 25%, 12.5% 100%, auto;
+  box-shadow:
+    inset 0 0 34px rgba(77, 238, 234, 0.08),
+    inset 0 0 70px rgba(156, 255, 0, 0.045),
+    0 0 28px rgba(77, 238, 234, 0.06);
 }
 
 .overlay-chart {
@@ -1046,12 +1073,34 @@
   stroke-width: 1.25;
 }
 
+.overlay-chart__line-glow,
 .overlay-chart__line {
   fill: none;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+.overlay-chart__line-glow {
+  opacity: 0.28;
+  stroke-width: 11;
+  filter: blur(5px);
+}
+
+.overlay-chart__line {
   stroke-width: 3.5;
-  filter: drop-shadow(0 0 7px rgba(156, 255, 0, 0.22));
+  filter:
+    drop-shadow(0 0 7px rgba(156, 255, 0, 0.32))
+    drop-shadow(0 0 15px rgba(77, 238, 234, 0.18));
+}
+
+.overlay-chart__point-glow {
+  opacity: 0.28;
+  filter: blur(4px);
+}
+
+.overlay-chart__point {
+  stroke: rgba(255, 255, 255, 0.76);
+  stroke-width: 1.25;
 }
 
 .overlay-chart__cursor {
@@ -1060,9 +1109,42 @@
   stroke-width: 1.4;
 }
 
+.overlay-chart__indicator-band {
+  opacity: 0.09;
+  mix-blend-mode: screen;
+}
+
+.overlay-chart__indicator-glow,
+.overlay-chart__indicator-line {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.overlay-chart__indicator-glow {
+  opacity: 0.18;
+  stroke-width: 8;
+  filter: blur(4px);
+}
+
+.overlay-chart__indicator-line {
+  opacity: 0.78;
+  stroke-width: 1.8;
+  filter: drop-shadow(0 0 8px rgba(77, 238, 234, 0.18));
+}
+
+.overlay-chart__indicator-line--ema12 {
+  stroke-dasharray: 5 6;
+}
+
+.overlay-chart__indicator-line--sma20 {
+  stroke-dasharray: 10 5;
+}
+
 .overlay-chart__candle line {
   stroke-width: 1.5;
   opacity: 0.88;
+  filter: drop-shadow(0 0 5px rgba(77, 238, 234, 0.18));
 }
 
 .overlay-chart__candle rect {
@@ -1281,11 +1363,13 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .chart-view-toggle {
+  .chart-view-toggle,
+  .indicator-toggle-group {
     width: 100%;
   }
 
-  .chart-view-toggle__button {
+  .chart-view-toggle__button,
+  .indicator-toggle {
     flex: 1 1 0;
     min-width: 0;
   }

@@ -51,11 +51,49 @@ type ChartGeometry = {
 };
 
 type ChartViewMode = 'line' | 'candlestick';
+type IndicatorId = 'sma20' | 'ema12' | 'range';
+
+type IndicatorDefinition = {
+  id: IndicatorId;
+  label: string;
+  description: string;
+  icon: 'line' | 'bar' | 'signal';
+};
+
+type IndicatorOverlay = {
+  id: string;
+  indicatorId: IndicatorId;
+  kind: 'line' | 'band';
+  symbol: string;
+  label: string;
+  color: string;
+  path: string;
+};
 
 const CHART_COLORS = ['#9cff00', '#4deeea', '#ffcf5a', '#ff5f7e', '#a78bfa', '#f97316'];
 const EMPTY_STATE: SeriesState = { status: 'ready', points: [], error: null };
 const LOADING_STATE: SeriesState = { status: 'loading', points: [], error: null };
 const MAX_POINTS_PER_SERIES = 140;
+const INDICATORS: IndicatorDefinition[] = [
+  {
+    id: 'sma20',
+    label: 'SMA 20',
+    description: 'Trailing 20-point simple moving average',
+    icon: 'line'
+  },
+  {
+    id: 'ema12',
+    label: 'EMA 12',
+    description: 'Trailing 12-point exponential moving average',
+    icon: 'signal'
+  },
+  {
+    id: 'range',
+    label: 'Range',
+    description: 'High and low range band from cached candles',
+    icon: 'bar'
+  }
+];
 
 export function OverlayComparisonChart({
   candidateSymbols,
@@ -72,6 +110,7 @@ export function OverlayComparisonChart({
 }) {
   const [seriesBySymbol, setSeriesBySymbol] = useState<Record<string, SeriesState>>({});
   const [viewMode, setViewMode] = useState<ChartViewMode>('line');
+  const [enabledIndicators, setEnabledIndicators] = useState<Set<IndicatorId>>(() => new Set(['sma20']));
   const [hoverRatio, setHoverRatio] = useState<number | null>(null);
   const processedEvents = useRef(new Set<string>());
   const availableSymbols = useMemo(
@@ -175,6 +214,12 @@ export function OverlayComparisonChart({
     [selectedSymbols, seriesBySymbol]
   );
   const geometry = useMemo(() => chartGeometry(renderedSeries), [renderedSeries]);
+  const indicatorOverlays = useMemo(
+    () => buildIndicatorOverlays(renderedSeries, enabledIndicators, geometry),
+    [renderedSeries, enabledIndicators, geometry]
+  );
+  const bandOverlays = indicatorOverlays.filter((overlay) => overlay.kind === 'band');
+  const lineOverlays = indicatorOverlays.filter((overlay) => overlay.kind === 'line');
   const hoverTime = hoverRatio === null
     ? null
     : geometry.minTime + hoverRatio * (geometry.maxTime - geometry.minTime);
@@ -194,6 +239,18 @@ export function OverlayComparisonChart({
     const bounds = event.currentTarget.getBoundingClientRect();
     const ratio = (event.clientX - bounds.left) / bounds.width;
     setHoverRatio(Math.min(1, Math.max(0, ratio)));
+  }
+
+  function toggleIndicator(indicatorId: IndicatorId) {
+    setEnabledIndicators((current) => {
+      const next = new Set(current);
+      if (next.has(indicatorId)) {
+        next.delete(indicatorId);
+      } else {
+        next.add(indicatorId);
+      }
+      return next;
+    });
   }
 
   return (
@@ -224,6 +281,24 @@ export function OverlayComparisonChart({
               <BarChart3 size={15} />
               <span>Candles</span>
             </button>
+          </div>
+          <div className="indicator-toggle-group" role="group" aria-label="Indicator overlays">
+            {INDICATORS.map((indicator) => {
+              const enabled = enabledIndicators.has(indicator.id);
+              return (
+                <button
+                  className={enabled ? 'indicator-toggle is-selected' : 'indicator-toggle'}
+                  key={indicator.id}
+                  type="button"
+                  onClick={() => toggleIndicator(indicator.id)}
+                  aria-pressed={enabled}
+                  title={indicator.description}
+                >
+                  <IndicatorIcon icon={indicator.icon} />
+                  <span>{indicator.label}</span>
+                </button>
+              );
+            })}
           </div>
           {availableSymbols.map((symbol) => {
             const selected = selectedSymbols.includes(symbol);
@@ -258,18 +333,39 @@ export function OverlayComparisonChart({
               })}
             </g>
             <line className="overlay-chart__zero" x1={geometry.left} x2={geometry.right} y1={yForChange(0, geometry)} y2={yForChange(0, geometry)} />
+            {bandOverlays.map((overlay) => (
+              <path
+                className="overlay-chart__indicator-band"
+                d={overlay.path}
+                fill={overlay.color}
+                key={overlay.id}
+              />
+            ))}
             {renderedSeries.map((series, seriesIndex) => (
               <g key={series.symbol}>
                 {viewMode === 'line' && series.path ? (
-                  <path className="overlay-chart__line" d={series.path} stroke={series.color} />
+                  <>
+                    <path className="overlay-chart__line-glow" d={series.path} stroke={series.color} />
+                    <path className="overlay-chart__line" d={series.path} stroke={series.color} />
+                  </>
                 ) : null}
                 {viewMode === 'line' && series.points.length === 1 ? (
-                  <circle
-                    cx={xForTime(series.points[0].timestamp, geometry)}
-                    cy={yForChange(0, geometry)}
-                    fill={series.color}
-                    r="5"
-                  />
+                  <>
+                    <circle
+                      className="overlay-chart__point-glow"
+                      cx={xForTime(series.points[0].timestamp, geometry)}
+                      cy={yForChange(0, geometry)}
+                      fill={series.color}
+                      r="9"
+                    />
+                    <circle
+                      className="overlay-chart__point"
+                      cx={xForTime(series.points[0].timestamp, geometry)}
+                      cy={yForChange(0, geometry)}
+                      fill={series.color}
+                      r="5"
+                    />
+                  </>
                 ) : null}
                 {viewMode === 'candlestick'
                   ? series.points.map((point) => (
@@ -284,6 +380,16 @@ export function OverlayComparisonChart({
                     />
                   ))
                   : null}
+              </g>
+            ))}
+            {lineOverlays.map((overlay) => (
+              <g key={overlay.id}>
+                <path className="overlay-chart__indicator-glow" d={overlay.path} stroke={overlay.color} />
+                <path
+                  className={`overlay-chart__indicator-line overlay-chart__indicator-line--${overlay.indicatorId}`}
+                  d={overlay.path}
+                  stroke={overlay.color}
+                />
               </g>
             ))}
             {hoverX !== null ? (
@@ -311,6 +417,16 @@ export function OverlayComparisonChart({
       </div>
     </Panel>
   );
+}
+
+function IndicatorIcon({ icon }: { icon: IndicatorDefinition['icon'] }) {
+  if (icon === 'bar') {
+    return <BarChart3 size={15} />;
+  }
+  if (icon === 'signal') {
+    return <RadioTower size={15} />;
+  }
+  return <LineChart size={15} />;
 }
 
 function ChartStatus({
@@ -410,6 +526,124 @@ function buildRenderedSeries(
       path: linePath(points, baseValue, geometry)
     };
   });
+}
+
+function buildIndicatorOverlays(
+  series: RenderedSeries[],
+  enabledIndicators: Set<IndicatorId>,
+  geometry: ChartGeometry
+): IndicatorOverlay[] {
+  const overlays: IndicatorOverlay[] = [];
+
+  for (const item of series) {
+    if (!item.baseValue || item.points.length === 0) {
+      continue;
+    }
+
+    if (enabledIndicators.has('range') && item.points.length > 1) {
+      const path = rangeBandPath(item.points, item.baseValue, geometry);
+      if (path) {
+        overlays.push({
+          id: `${item.symbol}-range`,
+          indicatorId: 'range',
+          kind: 'band',
+          symbol: item.symbol,
+          label: 'Range',
+          color: item.color,
+          path
+        });
+      }
+    }
+
+    if (enabledIndicators.has('sma20')) {
+      const path = indicatorPath(trailingAverage(item.points, 20), item.baseValue, geometry);
+      if (path) {
+        overlays.push({
+          id: `${item.symbol}-sma20`,
+          indicatorId: 'sma20',
+          kind: 'line',
+          symbol: item.symbol,
+          label: 'SMA 20',
+          color: item.color,
+          path
+        });
+      }
+    }
+
+    if (enabledIndicators.has('ema12')) {
+      const path = indicatorPath(exponentialAverage(item.points, 12), item.baseValue, geometry);
+      if (path) {
+        overlays.push({
+          id: `${item.symbol}-ema12`,
+          indicatorId: 'ema12',
+          kind: 'line',
+          symbol: item.symbol,
+          label: 'EMA 12',
+          color: item.color,
+          path
+        });
+      }
+    }
+  }
+
+  return overlays;
+}
+
+function trailingAverage(points: ChartPoint[], windowSize: number) {
+  return points.map((point, index) => {
+    const window = points.slice(Math.max(0, index - windowSize + 1), index + 1);
+    const value = window.reduce((total, item) => total + item.value, 0) / window.length;
+    return { timestamp: point.timestamp, value };
+  });
+}
+
+function exponentialAverage(points: ChartPoint[], windowSize: number) {
+  const smoothing = 2 / (windowSize + 1);
+  let previous = points[0]?.value ?? 0;
+  return points.map((point, index) => {
+    previous = index === 0 ? point.value : point.value * smoothing + previous * (1 - smoothing);
+    return { timestamp: point.timestamp, value: previous };
+  });
+}
+
+function indicatorPath(
+  points: Array<{ timestamp: number; value: number }>,
+  baseValue: number | null,
+  geometry: ChartGeometry
+) {
+  if (!baseValue || points.length < 2) {
+    return '';
+  }
+
+  return points
+    .map((point, index) => {
+      const x = xForTime(point.timestamp, geometry);
+      const y = yForChange(valueChange(point.value, baseValue), geometry);
+      return `${index === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`;
+    })
+    .join(' ');
+}
+
+function rangeBandPath(points: ChartPoint[], baseValue: number | null, geometry: ChartGeometry) {
+  if (!baseValue || points.length < 2) {
+    return '';
+  }
+
+  const upper = points.map((point, index) => {
+    const x = xForTime(point.timestamp, geometry);
+    const y = yForChange(valueChange(point.high, baseValue), geometry);
+    return `${index === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`;
+  });
+  const lower = points
+    .slice()
+    .reverse()
+    .map((point) => {
+      const x = xForTime(point.timestamp, geometry);
+      const y = yForChange(valueChange(point.low, baseValue), geometry);
+      return `L ${x.toFixed(2)} ${y.toFixed(2)}`;
+    });
+
+  return [...upper, ...lower, 'Z'].join(' ');
 }
 
 function chartGeometry(series: RenderedSeries[]): ChartGeometry {
