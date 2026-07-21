@@ -16,6 +16,7 @@ type ChartPoint = {
   high: number;
   low: number;
   value: number;
+  volume: number | null;
   source: 'cache' | 'live';
 };
 
@@ -51,7 +52,7 @@ type ChartGeometry = {
 };
 
 type ChartViewMode = 'line' | 'candlestick';
-type IndicatorId = 'sma20' | 'ema12' | 'range';
+type IndicatorId = 'sma20' | 'ema12' | 'bollinger20' | 'rsi14' | 'macd' | 'volume' | 'range';
 
 type IndicatorDefinition = {
   id: IndicatorId;
@@ -63,11 +64,20 @@ type IndicatorDefinition = {
 type IndicatorOverlay = {
   id: string;
   indicatorId: IndicatorId;
-  kind: 'line' | 'band';
+  kind: 'line' | 'band' | 'oscillator' | 'bars';
   symbol: string;
   label: string;
   color: string;
-  path: string;
+  path?: string;
+  bars?: IndicatorBar[];
+};
+
+type IndicatorBar = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  positive: boolean;
 };
 
 const CHART_COLORS = ['#9cff00', '#4deeea', '#ffcf5a', '#ff5f7e', '#a78bfa', '#f97316'];
@@ -86,6 +96,30 @@ const INDICATORS: IndicatorDefinition[] = [
     label: 'EMA 12',
     description: 'Trailing 12-point exponential moving average',
     icon: 'signal'
+  },
+  {
+    id: 'bollinger20',
+    label: 'BB 20',
+    description: '20-point Bollinger band with two standard deviations',
+    icon: 'bar'
+  },
+  {
+    id: 'rsi14',
+    label: 'RSI 14',
+    description: '14-point relative strength index in the upper oscillator lane',
+    icon: 'signal'
+  },
+  {
+    id: 'macd',
+    label: 'MACD',
+    description: '12/26 MACD line, signal line, and histogram',
+    icon: 'line'
+  },
+  {
+    id: 'volume',
+    label: 'Volume',
+    description: 'Cached or live volume bars in the lower lane',
+    icon: 'bar'
   },
   {
     id: 'range',
@@ -200,6 +234,7 @@ export function OverlayComparisonChart({
             high: price,
             low: price,
             value: price,
+            volume: volumeFromRealtimePayload(event.payload),
             source: 'live'
           }),
           error: existing.error
@@ -220,6 +255,8 @@ export function OverlayComparisonChart({
   );
   const bandOverlays = indicatorOverlays.filter((overlay) => overlay.kind === 'band');
   const lineOverlays = indicatorOverlays.filter((overlay) => overlay.kind === 'line');
+  const oscillatorOverlays = indicatorOverlays.filter((overlay) => overlay.kind === 'oscillator');
+  const barOverlays = indicatorOverlays.filter((overlay) => overlay.kind === 'bars');
   const hoverTime = hoverRatio === null
     ? null
     : geometry.minTime + hoverRatio * (geometry.maxTime - geometry.minTime);
@@ -335,8 +372,8 @@ export function OverlayComparisonChart({
             <line className="overlay-chart__zero" x1={geometry.left} x2={geometry.right} y1={yForChange(0, geometry)} y2={yForChange(0, geometry)} />
             {bandOverlays.map((overlay) => (
               <path
-                className="overlay-chart__indicator-band"
-                d={overlay.path}
+                className={`overlay-chart__indicator-band overlay-chart__indicator-band--${overlay.indicatorId}`}
+                d={overlay.path ?? ''}
                 fill={overlay.color}
                 key={overlay.id}
               />
@@ -384,12 +421,36 @@ export function OverlayComparisonChart({
             ))}
             {lineOverlays.map((overlay) => (
               <g key={overlay.id}>
-                <path className="overlay-chart__indicator-glow" d={overlay.path} stroke={overlay.color} />
+                <path className="overlay-chart__indicator-glow" d={overlay.path ?? ''} stroke={overlay.color} />
                 <path
                   className={`overlay-chart__indicator-line overlay-chart__indicator-line--${overlay.indicatorId}`}
-                  d={overlay.path}
+                  d={overlay.path ?? ''}
                   stroke={overlay.color}
                 />
+              </g>
+            ))}
+            <IndicatorGuides overlays={oscillatorOverlays} geometry={geometry} />
+            {oscillatorOverlays.map((overlay) => (
+              <path
+                className={`overlay-chart__indicator-oscillator overlay-chart__indicator-oscillator--${overlay.indicatorId}`}
+                d={overlay.path ?? ''}
+                key={overlay.id}
+                stroke={overlay.color}
+              />
+            ))}
+            {barOverlays.map((overlay) => (
+              <g className={`overlay-chart__indicator-bars overlay-chart__indicator-bars--${overlay.indicatorId}`} key={overlay.id}>
+                {(overlay.bars ?? []).map((bar, index) => (
+                  <rect
+                    className={bar.positive ? 'overlay-chart__indicator-bar is-positive' : 'overlay-chart__indicator-bar is-negative'}
+                    fill={overlay.color}
+                    height={bar.height}
+                    key={`${overlay.id}-${index}`}
+                    width={bar.width}
+                    x={bar.x}
+                    y={bar.y}
+                  />
+                ))}
               </g>
             ))}
             {hoverX !== null ? (
@@ -427,6 +488,37 @@ function IndicatorIcon({ icon }: { icon: IndicatorDefinition['icon'] }) {
     return <RadioTower size={15} />;
   }
   return <LineChart size={15} />;
+}
+
+function IndicatorGuides({
+  overlays,
+  geometry
+}: {
+  overlays: IndicatorOverlay[];
+  geometry: ChartGeometry;
+}) {
+  const showRsi = overlays.some((overlay) => overlay.indicatorId === 'rsi14');
+  const showMacd = overlays.some((overlay) => overlay.indicatorId === 'macd');
+
+  return (
+    <>
+      {showRsi ? (
+        <g className="overlay-chart__indicator-guides">
+          <line x1={geometry.left} x2={geometry.right} y1={rsiY(70, geometry)} y2={rsiY(70, geometry)} />
+          <line x1={geometry.left} x2={geometry.right} y1={rsiY(30, geometry)} y2={rsiY(30, geometry)} />
+        </g>
+      ) : null}
+      {showMacd ? (
+        <line
+          className="overlay-chart__indicator-guide-zero"
+          x1={geometry.left}
+          x2={geometry.right}
+          y1={indicatorLane('macd', geometry).baseline}
+          y2={indicatorLane('macd', geometry).baseline}
+        />
+      ) : null}
+    </>
+  );
 }
 
 function ChartStatus({
@@ -555,6 +647,21 @@ function buildIndicatorOverlays(
       }
     }
 
+    if (enabledIndicators.has('bollinger20') && item.points.length > 1) {
+      const path = bollingerBandPath(item.points, item.baseValue, geometry, 20, 2);
+      if (path) {
+        overlays.push({
+          id: `${item.symbol}-bollinger20`,
+          indicatorId: 'bollinger20',
+          kind: 'band',
+          symbol: item.symbol,
+          label: 'BB 20',
+          color: item.color,
+          path
+        });
+      }
+    }
+
     if (enabledIndicators.has('sma20')) {
       const path = indicatorPath(trailingAverage(item.points, 20), item.baseValue, geometry);
       if (path) {
@@ -584,26 +691,319 @@ function buildIndicatorOverlays(
         });
       }
     }
+
+    if (enabledIndicators.has('rsi14')) {
+      const path = oscillatorPath(relativeStrengthIndex(item.points, 14), geometry, 'rsi');
+      if (path) {
+        overlays.push({
+          id: `${item.symbol}-rsi14`,
+          indicatorId: 'rsi14',
+          kind: 'oscillator',
+          symbol: item.symbol,
+          label: 'RSI 14',
+          color: item.color,
+          path
+        });
+      }
+    }
+
+    if (enabledIndicators.has('macd')) {
+      const macd = macdSeries(item.points, 12, 26, 9);
+      const extent = symmetricExtent([
+        ...macd.map((point) => point.macd),
+        ...macd.map((point) => point.signal),
+        ...macd.map((point) => point.histogram)
+      ]);
+      const macdPath = valuePath(macd.map((point) => ({ timestamp: point.timestamp, value: point.macd })), geometry, 'macd', -extent, extent);
+      const signalPath = valuePath(macd.map((point) => ({ timestamp: point.timestamp, value: point.signal })), geometry, 'macd', -extent, extent);
+      const histogramBars = histogramBarsForValues(
+        macd.map((point) => ({ timestamp: point.timestamp, value: point.histogram })),
+        geometry,
+        'macd',
+        extent,
+        item.color
+      );
+
+      if (histogramBars.length > 0) {
+        overlays.push({
+          id: `${item.symbol}-macd-histogram`,
+          indicatorId: 'macd',
+          kind: 'bars',
+          symbol: item.symbol,
+          label: 'MACD histogram',
+          color: item.color,
+          bars: histogramBars
+        });
+      }
+      if (macdPath) {
+        overlays.push({
+          id: `${item.symbol}-macd`,
+          indicatorId: 'macd',
+          kind: 'oscillator',
+          symbol: item.symbol,
+          label: 'MACD',
+          color: item.color,
+          path: macdPath
+        });
+      }
+      if (signalPath) {
+        overlays.push({
+          id: `${item.symbol}-macd-signal`,
+          indicatorId: 'macd',
+          kind: 'oscillator',
+          symbol: item.symbol,
+          label: 'MACD signal',
+          color: '#ffcf5a',
+          path: signalPath
+        });
+      }
+    }
+
+    if (enabledIndicators.has('volume')) {
+      const bars = volumeBarsForSeries(item, geometry, series.length, series.indexOf(item));
+      if (bars.length > 0) {
+        overlays.push({
+          id: `${item.symbol}-volume`,
+          indicatorId: 'volume',
+          kind: 'bars',
+          symbol: item.symbol,
+          label: 'Volume',
+          color: item.color,
+          bars
+        });
+      }
+    }
   }
 
   return overlays;
 }
 
-function trailingAverage(points: ChartPoint[], windowSize: number) {
-  return points.map((point, index) => {
+function bollingerBandPath(
+  points: ChartPoint[],
+  baseValue: number | null,
+  geometry: ChartGeometry,
+  windowSize: number,
+  deviationMultiplier: number
+) {
+  if (!baseValue || points.length < 2) {
+    return '';
+  }
+
+  const bands = points.map((point, index) => {
     const window = points.slice(Math.max(0, index - windowSize + 1), index + 1);
-    const value = window.reduce((total, item) => total + item.value, 0) / window.length;
-    return { timestamp: point.timestamp, value };
+    const average = window.reduce((total, item) => total + item.value, 0) / window.length;
+    const variance = window.reduce((total, item) => total + (item.value - average) ** 2, 0) / window.length;
+    const deviation = Math.sqrt(variance) * deviationMultiplier;
+    return {
+      timestamp: point.timestamp,
+      upper: average + deviation,
+      lower: Math.max(0.000001, average - deviation)
+    };
+  });
+
+  const upper = bands.map((point, index) => {
+    const x = xForTime(point.timestamp, geometry);
+    const y = yForChange(valueChange(point.upper, baseValue), geometry);
+    return `${index === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`;
+  });
+  const lower = bands
+    .slice()
+    .reverse()
+    .map((point) => {
+      const x = xForTime(point.timestamp, geometry);
+      const y = yForChange(valueChange(point.lower, baseValue), geometry);
+      return `L ${x.toFixed(2)} ${y.toFixed(2)}`;
+    });
+
+  return [...upper, ...lower, 'Z'].join(' ');
+}
+
+function relativeStrengthIndex(points: ChartPoint[], windowSize: number) {
+  if (points.length < 2) {
+    return [];
+  }
+
+  let averageGain = 0;
+  let averageLoss = 0;
+  const values: Array<{ timestamp: number; value: number }> = [];
+
+  for (let index = 1; index < points.length; index += 1) {
+    const change = points[index].value - points[index - 1].value;
+    const gain = Math.max(0, change);
+    const loss = Math.max(0, -change);
+
+    if (index <= windowSize) {
+      averageGain += gain / windowSize;
+      averageLoss += loss / windowSize;
+    } else {
+      averageGain = (averageGain * (windowSize - 1) + gain) / windowSize;
+      averageLoss = (averageLoss * (windowSize - 1) + loss) / windowSize;
+    }
+
+    if (index >= windowSize) {
+      const value = averageLoss === 0
+        ? 100
+        : 100 - (100 / (1 + averageGain / averageLoss));
+      values.push({ timestamp: points[index].timestamp, value });
+    }
+  }
+
+  return values;
+}
+
+function macdSeries(points: ChartPoint[], fastWindow: number, slowWindow: number, signalWindow: number) {
+  if (points.length < 2) {
+    return [];
+  }
+
+  const fast = exponentialAverage(points, fastWindow);
+  const slow = exponentialAverage(points, slowWindow);
+  const macd = fast.map((point, index) => ({
+    timestamp: point.timestamp,
+    value: point.value - (slow[index]?.value ?? point.value)
+  }));
+  const signal = exponentialAverageValues(macd, signalWindow);
+
+  return macd.map((point, index) => ({
+    timestamp: point.timestamp,
+    macd: point.value,
+    signal: signal[index]?.value ?? point.value,
+    histogram: point.value - (signal[index]?.value ?? point.value)
+  }));
+}
+
+function oscillatorPath(
+  points: Array<{ timestamp: number; value: number }>,
+  geometry: ChartGeometry,
+  lane: 'rsi' | 'macd'
+) {
+  return valuePath(points, geometry, lane, lane === 'rsi' ? 0 : -1, lane === 'rsi' ? 100 : 1);
+}
+
+function valuePath(
+  points: Array<{ timestamp: number; value: number }>,
+  geometry: ChartGeometry,
+  lane: 'rsi' | 'macd',
+  minValue: number,
+  maxValue: number
+) {
+  if (points.length < 2 || maxValue === minValue) {
+    return '';
+  }
+
+  return points
+    .map((point, index) => {
+      const x = xForTime(point.timestamp, geometry);
+      const y = yForIndicatorValue(point.value, geometry, lane, minValue, maxValue);
+      return `${index === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`;
+    })
+    .join(' ');
+}
+
+function histogramBarsForValues(
+  values: Array<{ timestamp: number; value: number }>,
+  geometry: ChartGeometry,
+  lane: 'macd',
+  extent: number,
+  _color: string
+) {
+  if (values.length === 0 || extent <= 0) {
+    return [];
+  }
+
+  const laneGeometry = indicatorLane(lane, geometry);
+  const barWidth = Math.max(2, Math.min(9, geometry.width / Math.max(80, values.length * 1.6)));
+
+  return values.map((point) => {
+    const x = xForTime(point.timestamp, geometry) - barWidth / 2;
+    const y = yForIndicatorValue(point.value, geometry, lane, -extent, extent);
+    const baseline = laneGeometry.baseline;
+    return {
+      x,
+      y: Math.min(y, baseline),
+      width: barWidth,
+      height: Math.max(1, Math.abs(y - baseline)),
+      positive: point.value >= 0
+    };
   });
 }
 
-function exponentialAverage(points: ChartPoint[], windowSize: number) {
+function volumeBarsForSeries(
+  series: RenderedSeries,
+  geometry: ChartGeometry,
+  seriesCount: number,
+  seriesIndex: number
+) {
+  const volumePoints = series.points
+    .map((point) => ({ timestamp: point.timestamp, value: point.volume ?? 0 }))
+    .filter((point) => point.value > 0);
+  if (volumePoints.length === 0) {
+    return [];
+  }
+
+  const laneGeometry = indicatorLane('volume', geometry);
+  const maxVolume = Math.max(...volumePoints.map((point) => point.value));
+  const barWidth = Math.max(2, Math.min(8, geometry.width / Math.max(90, volumePoints.length * 1.9)));
+  const offset = (seriesIndex - (seriesCount - 1) / 2) * Math.min(4, barWidth * 0.75);
+
+  return volumePoints.map((point) => {
+    const height = Math.max(1, (point.value / maxVolume) * laneGeometry.height);
+    return {
+      x: xForTime(point.timestamp, geometry) - barWidth / 2 + offset,
+      y: laneGeometry.bottom - height,
+      width: barWidth,
+      height,
+      positive: true
+    };
+  });
+}
+
+function exponentialAverageValues(points: Array<{ timestamp: number; value: number }>, windowSize: number) {
   const smoothing = 2 / (windowSize + 1);
   let previous = points[0]?.value ?? 0;
   return points.map((point, index) => {
     previous = index === 0 ? point.value : point.value * smoothing + previous * (1 - smoothing);
     return { timestamp: point.timestamp, value: previous };
   });
+}
+
+function symmetricExtent(values: number[]) {
+  const finiteValues = values.filter((value) => Number.isFinite(value));
+  if (finiteValues.length === 0) {
+    return 1;
+  }
+  return Math.max(0.000001, ...finiteValues.map((value) => Math.abs(value)));
+}
+
+function indicatorLane(lane: 'rsi' | 'macd' | 'volume', geometry: ChartGeometry) {
+  if (lane === 'rsi') {
+    const top = geometry.top + 8;
+    const bottom = top + 48;
+    return { top, bottom, height: bottom - top, baseline: top + (bottom - top) / 2 };
+  }
+  if (lane === 'macd') {
+    const top = geometry.bottom - 122;
+    const bottom = geometry.bottom - 72;
+    return { top, bottom, height: bottom - top, baseline: top + (bottom - top) / 2 };
+  }
+  const bottom = geometry.bottom - 8;
+  const top = bottom - 48;
+  return { top, bottom, height: bottom - top, baseline: bottom };
+}
+
+function rsiY(value: number, geometry: ChartGeometry) {
+  return yForIndicatorValue(value, geometry, 'rsi', 0, 100);
+}
+
+function yForIndicatorValue(
+  value: number,
+  geometry: ChartGeometry,
+  lane: 'rsi' | 'macd',
+  minValue: number,
+  maxValue: number
+) {
+  const laneGeometry = indicatorLane(lane, geometry);
+  return laneGeometry.bottom - ((value - minValue) / (maxValue - minValue)) * laneGeometry.height;
 }
 
 function indicatorPath(
@@ -644,6 +1044,23 @@ function rangeBandPath(points: ChartPoint[], baseValue: number | null, geometry:
     });
 
   return [...upper, ...lower, 'Z'].join(' ');
+}
+
+function trailingAverage(points: ChartPoint[], windowSize: number) {
+  return points.map((point, index) => {
+    const window = points.slice(Math.max(0, index - windowSize + 1), index + 1);
+    const value = window.reduce((total, item) => total + item.value, 0) / window.length;
+    return { timestamp: point.timestamp, value };
+  });
+}
+
+function exponentialAverage(points: ChartPoint[], windowSize: number) {
+  const smoothing = 2 / (windowSize + 1);
+  let previous = points[0]?.value ?? 0;
+  return points.map((point, index) => {
+    previous = index === 0 ? point.value : point.value * smoothing + previous * (1 - smoothing);
+    return { timestamp: point.timestamp, value: previous };
+  });
 }
 
 function chartGeometry(series: RenderedSeries[]): ChartGeometry {
@@ -757,6 +1174,7 @@ function pointFromTimeframe(point: TimeframePoint): ChartPoint | null {
     high: Math.max(high, open, value),
     low: Math.min(low, open, value),
     value,
+    volume: positiveNumber(point.volume),
     source: 'cache'
   };
 }
@@ -795,6 +1213,16 @@ function priceFromRealtimePayload(payload: unknown) {
   const value = record.price ?? record.close_price ?? record.close ?? record.value;
   const price = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : null;
   return price && Number.isFinite(price) && price > 0 ? price : null;
+}
+
+function volumeFromRealtimePayload(payload: unknown) {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+  const record = payload as Record<string, unknown>;
+  const value = record.volume ?? record.size ?? record.quantity ?? record.trade_volume;
+  const volume = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : null;
+  return volume && Number.isFinite(volume) && volume > 0 ? volume : null;
 }
 
 function positiveNumber(value: string | null) {
