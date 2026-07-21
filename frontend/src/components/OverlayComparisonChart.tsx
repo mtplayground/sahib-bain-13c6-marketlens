@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent } from 'react';
-import { LineChart, RadioTower, RefreshCw, X } from 'lucide-react';
+import { BarChart3, LineChart, RadioTower, RefreshCw, X } from 'lucide-react';
 import {
   loadTimeframeSeries,
   type TimeframePoint
@@ -12,6 +12,9 @@ import { Panel } from './Panel';
 
 type ChartPoint = {
   timestamp: number;
+  open: number;
+  high: number;
+  low: number;
   value: number;
   source: 'cache' | 'live';
 };
@@ -47,6 +50,8 @@ type ChartGeometry = {
   maxChange: number;
 };
 
+type ChartViewMode = 'line' | 'candlestick';
+
 const CHART_COLORS = ['#9cff00', '#4deeea', '#ffcf5a', '#ff5f7e', '#a78bfa', '#f97316'];
 const EMPTY_STATE: SeriesState = { status: 'ready', points: [], error: null };
 const LOADING_STATE: SeriesState = { status: 'loading', points: [], error: null };
@@ -66,6 +71,7 @@ export function OverlayComparisonChart({
   onToggleSymbol: (symbol: string) => void;
 }) {
   const [seriesBySymbol, setSeriesBySymbol] = useState<Record<string, SeriesState>>({});
+  const [viewMode, setViewMode] = useState<ChartViewMode>('line');
   const [hoverRatio, setHoverRatio] = useState<number | null>(null);
   const processedEvents = useRef(new Set<string>());
   const availableSymbols = useMemo(
@@ -151,6 +157,9 @@ export function OverlayComparisonChart({
           status: existing.status === 'loading' ? 'ready' : existing.status,
           points: appendPoint(existing.points, {
             timestamp,
+            open: price,
+            high: price,
+            low: price,
             value: price,
             source: 'live'
           }),
@@ -196,6 +205,26 @@ export function OverlayComparisonChart({
     >
       <div className="overlay-chart-layout">
         <div className="overlay-chart-controls" aria-label="Comparison instruments">
+          <div className="chart-view-toggle" role="group" aria-label="Chart view">
+            <button
+              className={viewMode === 'line' ? 'chart-view-toggle__button is-selected' : 'chart-view-toggle__button'}
+              type="button"
+              onClick={() => setViewMode('line')}
+              aria-pressed={viewMode === 'line'}
+            >
+              <LineChart size={15} />
+              <span>Line</span>
+            </button>
+            <button
+              className={viewMode === 'candlestick' ? 'chart-view-toggle__button is-selected' : 'chart-view-toggle__button'}
+              type="button"
+              onClick={() => setViewMode('candlestick')}
+              aria-pressed={viewMode === 'candlestick'}
+            >
+              <BarChart3 size={15} />
+              <span>Candles</span>
+            </button>
+          </div>
           {availableSymbols.map((symbol) => {
             const selected = selectedSymbols.includes(symbol);
             return (
@@ -229,12 +258,12 @@ export function OverlayComparisonChart({
               })}
             </g>
             <line className="overlay-chart__zero" x1={geometry.left} x2={geometry.right} y1={yForChange(0, geometry)} y2={yForChange(0, geometry)} />
-            {renderedSeries.map((series) => (
+            {renderedSeries.map((series, seriesIndex) => (
               <g key={series.symbol}>
-                {series.path ? (
+                {viewMode === 'line' && series.path ? (
                   <path className="overlay-chart__line" d={series.path} stroke={series.color} />
                 ) : null}
-                {series.points.length === 1 ? (
+                {viewMode === 'line' && series.points.length === 1 ? (
                   <circle
                     cx={xForTime(series.points[0].timestamp, geometry)}
                     cy={yForChange(0, geometry)}
@@ -242,6 +271,19 @@ export function OverlayComparisonChart({
                     r="5"
                   />
                 ) : null}
+                {viewMode === 'candlestick'
+                  ? series.points.map((point) => (
+                    <Candlestick
+                      color={series.color}
+                      geometry={geometry}
+                      key={`${series.symbol}-${point.timestamp}`}
+                      point={point}
+                      seriesBaseValue={series.baseValue}
+                      seriesCount={renderedSeries.length}
+                      seriesIndex={seriesIndex}
+                    />
+                  ))
+                  : null}
               </g>
             ))}
             {hoverX !== null ? (
@@ -294,6 +336,58 @@ function ChartStatus({
   );
 }
 
+function Candlestick({
+  color,
+  geometry,
+  point,
+  seriesBaseValue,
+  seriesCount,
+  seriesIndex
+}: {
+  color: string;
+  geometry: ChartGeometry;
+  point: ChartPoint;
+  seriesBaseValue: number | null;
+  seriesCount: number;
+  seriesIndex: number;
+}) {
+  if (!seriesBaseValue) {
+    return null;
+  }
+
+  const x = xForTime(point.timestamp, geometry);
+  const candleWidth = candleBodyWidth(geometry, seriesCount);
+  const offset = (seriesIndex - (seriesCount - 1) / 2) * (candleWidth + 3);
+  const centerX = x + offset;
+  const yOpen = yForChange(valueChange(point.open, seriesBaseValue), geometry);
+  const yClose = yForChange(valueChange(point.value, seriesBaseValue), geometry);
+  const yHigh = yForChange(valueChange(point.high, seriesBaseValue), geometry);
+  const yLow = yForChange(valueChange(point.low, seriesBaseValue), geometry);
+  const rising = point.value >= point.open;
+  const bodyTop = Math.min(yOpen, yClose);
+  const bodyHeight = Math.max(3, Math.abs(yClose - yOpen));
+
+  return (
+    <g className={rising ? 'overlay-chart__candle overlay-chart__candle--up' : 'overlay-chart__candle overlay-chart__candle--down'}>
+      <line
+        x1={centerX}
+        x2={centerX}
+        y1={Math.min(yHigh, yLow)}
+        y2={Math.max(yHigh, yLow)}
+        stroke={rising ? color : '#ff5f7e'}
+      />
+      <rect
+        x={centerX - candleWidth / 2}
+        y={bodyTop}
+        width={candleWidth}
+        height={bodyHeight}
+        stroke={color}
+        fill={rising ? color : '#ff5f7e'}
+      />
+    </g>
+  );
+}
+
 function buildRenderedSeries(
   selectedSymbols: string[],
   seriesBySymbol: Record<string, SeriesState>
@@ -321,7 +415,7 @@ function buildRenderedSeries(
 function chartGeometry(series: RenderedSeries[]): ChartGeometry {
   const changes = series.flatMap((item) =>
     item.points
-      .map((point) => pointChange(point, item.baseValue))
+      .flatMap((point) => pointChangeRange(point, item.baseValue))
       .filter((change): change is number => typeof change === 'number' && Number.isFinite(change))
   );
   return chartGeometryFromValues(series.flatMap((item) => item.points), changes);
@@ -338,7 +432,7 @@ function chartGeometryWithoutPaths(
   });
   const changes = series.flatMap((item) =>
     item.points
-      .map((point) => pointChange(point, item.baseValue))
+      .flatMap((point) => pointChangeRange(point, item.baseValue))
       .filter((change): change is number => typeof change === 'number' && Number.isFinite(change))
   );
   return chartGeometryFromValues(series.flatMap((item) => item.points), changes);
@@ -387,11 +481,31 @@ function yForChange(change: number, geometry: ChartGeometry) {
   return geometry.bottom - ((change - geometry.minChange) / (geometry.maxChange - geometry.minChange)) * geometry.height;
 }
 
+function candleBodyWidth(geometry: ChartGeometry, seriesCount: number) {
+  return Math.max(3, Math.min(12, geometry.width / Math.max(40, seriesCount * 24)));
+}
+
 function pointChange(point: ChartPoint | null | undefined, baseValue: number | null) {
   if (!point || !baseValue) {
     return null;
   }
-  return ((point.value - baseValue) / baseValue) * 100;
+  return valueChange(point.value, baseValue);
+}
+
+function pointChangeRange(point: ChartPoint | null | undefined, baseValue: number | null) {
+  if (!point || !baseValue) {
+    return [];
+  }
+  return [
+    valueChange(point.low, baseValue),
+    valueChange(point.open, baseValue),
+    valueChange(point.value, baseValue),
+    valueChange(point.high, baseValue)
+  ];
+}
+
+function valueChange(value: number, baseValue: number) {
+  return ((value - baseValue) / baseValue) * 100;
 }
 
 function pointFromTimeframe(point: TimeframePoint): ChartPoint | null {
@@ -400,7 +514,17 @@ function pointFromTimeframe(point: TimeframePoint): ChartPoint | null {
   if (!Number.isFinite(timestamp) || !Number.isFinite(value) || value <= 0) {
     return null;
   }
-  return { timestamp, value, source: 'cache' };
+  const open = positiveNumber(point.open_price) ?? value;
+  const high = positiveNumber(point.high_price) ?? Math.max(open, value);
+  const low = positiveNumber(point.low_price) ?? Math.min(open, value);
+  return {
+    timestamp,
+    open,
+    high: Math.max(high, open, value),
+    low: Math.min(low, open, value),
+    value,
+    source: 'cache'
+  };
 }
 
 function isChartPoint(point: ChartPoint | null): point is ChartPoint {
@@ -437,6 +561,14 @@ function priceFromRealtimePayload(payload: unknown) {
   const value = record.price ?? record.close_price ?? record.close ?? record.value;
   const price = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : null;
   return price && Number.isFinite(price) && price > 0 ? price : null;
+}
+
+function positiveNumber(value: string | null) {
+  if (!value) {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 function uniqueSymbols(symbols: string[]) {

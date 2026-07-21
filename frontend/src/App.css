@@ -980,6 +980,41 @@
   align-items: center;
 }
 
+.chart-view-toggle {
+  display: inline-flex;
+  min-height: 2.35rem;
+  overflow: hidden;
+  border: 1px solid var(--ml-border);
+  border-radius: var(--ml-radius);
+  background: rgba(7, 13, 8, 0.86);
+}
+
+.chart-view-toggle__button {
+  display: inline-flex;
+  gap: 0.4rem;
+  align-items: center;
+  justify-content: center;
+  min-width: 6.25rem;
+  padding: 0 0.75rem;
+  color: var(--ml-muted);
+  cursor: pointer;
+  border: 0;
+  border-right: 1px solid rgba(156, 255, 0, 0.14);
+  background: transparent;
+}
+
+.chart-view-toggle__button:last-child {
+  border-right: 0;
+}
+
+.chart-view-toggle__button:hover,
+.chart-view-toggle__button:focus-visible,
+.chart-view-toggle__button.is-selected {
+  color: var(--ml-lime);
+  outline: none;
+  background: rgba(156, 255, 0, 0.1);
+}
+
 .overlay-chart-shell {
   position: relative;
   min-height: 22rem;
@@ -1023,6 +1058,25 @@
   stroke: rgba(255, 255, 255, 0.42);
   stroke-dasharray: 4 6;
   stroke-width: 1.4;
+}
+
+.overlay-chart__candle line {
+  stroke-width: 1.5;
+  opacity: 0.88;
+}
+
+.overlay-chart__candle rect {
+  opacity: 0.72;
+  stroke-width: 1.2;
+  rx: 1.5;
+}
+
+.overlay-chart__candle--up rect {
+  fill-opacity: 0.42;
+}
+
+.overlay-chart__candle--down rect {
+  fill-opacity: 0.5;
 }
 
 .overlay-chart-empty {
@@ -1225,6 +1279,15 @@
 
   .market-shell__nav {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .chart-view-toggle {
+    width: 100%;
+  }
+
+  .chart-view-toggle__button {
+    flex: 1 1 0;
+    min-width: 0;
   }
 
   .dock-grid,
