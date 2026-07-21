@@ -12,6 +12,7 @@ mod redis;
 mod routes;
 mod series;
 mod state;
+mod timeframe;
 mod users;
 mod view_history;
 mod ws;
@@ -59,6 +60,7 @@ fn app(state: AppState) -> Router {
                 .merge(instrument_filter::router())
                 .merge(instrument_search::router())
                 .merge(popularity::router())
+                .merge(timeframe::router())
                 .merge(auth::public_router())
                 .merge(protected_auth),
         )
