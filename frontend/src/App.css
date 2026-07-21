@@ -968,6 +968,149 @@
   background: rgba(156, 255, 0, 0.035);
 }
 
+.analytics-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(18rem, 0.9fr) minmax(16rem, 0.8fr);
+  gap: 0.85rem;
+}
+
+.analytics-panel.is-loading {
+  opacity: 0.72;
+}
+
+.analytics-card {
+  display: grid;
+  gap: 0.75rem;
+  align-content: start;
+  min-width: 0;
+  padding: 0.85rem;
+  border: 1px solid rgba(77, 238, 234, 0.18);
+  border-radius: var(--ml-radius);
+  background: rgba(7, 13, 8, 0.72);
+}
+
+.analytics-card--matrix {
+  overflow: auto;
+}
+
+.analytics-card__header {
+  display: grid;
+  grid-template-columns: 1.25rem minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  align-items: center;
+  color: var(--ml-cyan);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.analytics-card__header strong,
+.analytics-card__header span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analytics-card__header span {
+  color: var(--ml-dim);
+  font-size: 0.72rem;
+}
+
+.correlation-grid {
+  display: grid;
+  gap: 0.35rem;
+  min-width: max-content;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.correlation-grid__corner,
+.correlation-grid__label,
+.correlation-cell {
+  display: grid;
+  min-width: 3.25rem;
+  min-height: 2.25rem;
+  place-items: center;
+  padding: 0 0.45rem;
+  border: 1px solid rgba(156, 255, 0, 0.12);
+  border-radius: var(--ml-radius);
+}
+
+.correlation-grid__label {
+  color: var(--ml-lime);
+  font-size: 0.72rem;
+  background: rgba(156, 255, 0, 0.06);
+}
+
+.correlation-cell {
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.performance-bars {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.performance-row {
+  display: grid;
+  grid-template-columns: minmax(4.5rem, 0.45fr) minmax(0, 1fr) minmax(4.5rem, 0.45fr);
+  gap: 0.65rem;
+  align-items: center;
+  min-height: 2.55rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.performance-row span,
+.performance-row strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.performance-row span {
+  color: var(--ml-lime);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.performance-row strong {
+  color: var(--ml-text);
+  font-size: 0.78rem;
+  text-align: right;
+}
+
+.performance-row__track {
+  position: relative;
+  height: 0.75rem;
+  overflow: hidden;
+  border: 1px solid rgba(156, 255, 0, 0.12);
+  border-radius: 999px;
+  background: rgba(156, 255, 0, 0.035);
+}
+
+.performance-row__track i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  min-width: 0.5rem;
+  border-radius: inherit;
+  box-shadow: 0 0 12px currentColor;
+}
+
+.performance-row__track i.is-positive {
+  color: var(--ml-lime);
+  background: linear-gradient(90deg, rgba(156, 255, 0, 0.22), var(--ml-lime));
+}
+
+.performance-row__track i.is-negative {
+  color: var(--ml-red);
+  background: linear-gradient(90deg, rgba(255, 95, 126, 0.2), var(--ml-red));
+}
+
+.risk-grid {
+  display: grid;
+  gap: 0.5rem;
+}
+
 .fundamentals-panel {
   display: grid;
   gap: 1rem;
@@ -1719,6 +1862,7 @@
   .auth-grid,
   .discovery-grid,
   .instrument-picker__grid,
+  .analytics-panel,
   .fundamentals-summary,
   .fundamentals-data-grid,
   .signal-stack,
@@ -1761,6 +1905,7 @@
   .price-strip,
   .realtime-tape__row,
   .usage-row,
+  .performance-row,
   .fundamentals-list-row,
   .yield-curve-bar,
   .overlay-chart-legend__row {
