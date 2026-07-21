@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   BarChart3,
+  Building2,
   CheckCircle2,
   CircleAlert,
   Eye,
   Flame,
   KeyRound,
+  Landmark,
   ListFilter,
   LogIn,
   MailCheck,
+  Percent,
   RadioTower,
   RefreshCw,
   Search as SearchIcon,
@@ -27,13 +30,19 @@ import { OverlayComparisonChart } from './components/OverlayComparisonChart';
 import { Panel } from './components/Panel';
 import {
   filterInstruments,
+  loadFundamentals,
   loadMostPopular,
   loadMostViewed,
   recordInstrumentView,
   searchInstruments,
   type AssetType,
+  type BondYieldCurvePoint,
+  type CompanyFinancial,
+  type CreditRating,
+  type FundamentalsResponse,
   type InstrumentCandidate,
   type InstrumentDiscoveryFilters,
+  type KeyRatios,
   type PopularInstrumentEntry,
   type ViewHistoryEntry
 } from './instruments';
@@ -434,6 +443,8 @@ function AuthenticatedDashboard({
       />
 
       <MostPopularPanel onSelectInstrument={handleOpenInstrument} />
+
+      <FundamentalsPanel instrument={activeInstrument} />
 
       <RealtimeConsole
         candidateSymbols={candidateSymbols}
@@ -895,6 +906,262 @@ function EmptyInstrumentPanel() {
     <div className="candidate-empty candidate-empty--tall">
       <Target size={24} />
       <span>No active instrument selected.</span>
+    </div>
+  );
+}
+
+type FundamentalsPanelState =
+  | { status: 'idle'; data: null; message: string }
+  | { status: 'loading'; data: FundamentalsResponse | null; message: string }
+  | { status: 'ready'; data: FundamentalsResponse; message: string }
+  | { status: 'error'; data: null; message: string };
+
+function FundamentalsPanel({ instrument }: { instrument: InstrumentCandidate | null }) {
+  const [state, setState] = useState<FundamentalsPanelState>({
+    status: 'idle',
+    data: null,
+    message: 'Select an instrument'
+  });
+
+  useEffect(() => {
+    if (!instrument) {
+      setState({ status: 'idle', data: null, message: 'Select an instrument' });
+      return;
+    }
+
+    let cancelled = false;
+    setState((current) => ({
+      status: 'loading',
+      data: current.data,
+      message: `Loading ${instrument.canonical_symbol}`
+    }));
+
+    loadFundamentals(instrument.id, 4)
+      .then((data) => {
+        if (cancelled) {
+          return;
+        }
+        const totalRows =
+          data.company_financials.length +
+          data.key_ratios.length +
+          data.credit_ratings.length +
+          data.bond_yield_curve_points.length;
+        setState({
+          status: 'ready',
+          data,
+          message: totalRows > 0 ? `${totalRows} records` : 'No fundamentals cached'
+        });
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setState({
+          status: 'error',
+          data: null,
+          message: error instanceof Error ? error.message : 'Fundamentals unavailable'
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [instrument]);
+
+  return (
+    <Panel
+      title="Fundamentals"
+      eyebrow="PRICE + DATA"
+      className="dashboard-grid__wide"
+      actions={<FundamentalsStatusPill status={state.status} message={state.message} />}
+    >
+      {!instrument ? (
+        <div className="usage-empty">
+          <Building2 size={20} />
+          <span>Select an instrument from Market Discovery to inspect cached fundamentals.</span>
+        </div>
+      ) : state.status === 'error' ? (
+        <div className="usage-empty">
+          <CircleAlert size={20} />
+          <span>{state.message}</span>
+        </div>
+      ) : (
+        <FundamentalsContent
+          fallbackInstrument={instrument}
+          data={state.data}
+          loading={state.status === 'loading'}
+        />
+      )}
+    </Panel>
+  );
+}
+
+function FundamentalsStatusPill({
+  status,
+  message
+}: {
+  status: FundamentalsPanelState['status'];
+  message: string;
+}) {
+  const tone = status === 'error' ? 'error' : status === 'loading' ? 'fallback' : 'open';
+
+  return (
+    <span className={`auth-pill auth-pill--${tone}`}>
+      {status === 'loading' ? <RefreshCw size={14} /> : <Building2 size={14} />}
+      {message}
+    </span>
+  );
+}
+
+function FundamentalsContent({
+  fallbackInstrument,
+  data,
+  loading
+}: {
+  fallbackInstrument: InstrumentCandidate;
+  data: FundamentalsResponse | null;
+  loading: boolean;
+}) {
+  const instrument = data?.instrument ?? fallbackInstrument;
+  const latestPrice = data?.latest_price ?? fallbackInstrument.latest_price ?? null;
+  const latestFinancial = data?.company_financials[0] ?? null;
+  const latestRatios = data?.key_ratios[0] ?? null;
+  const ratings = data?.credit_ratings ?? [];
+  const curvePoints = data?.bond_yield_curve_points ?? [];
+  const hasRows = Boolean(latestFinancial || latestRatios || ratings.length || curvePoints.length);
+
+  return (
+    <div className={loading ? 'fundamentals-panel is-loading' : 'fundamentals-panel'}>
+      <div className="fundamentals-summary">
+        <div className="fundamentals-summary__title">
+          <Building2 size={22} aria-hidden="true" />
+          <div>
+            <strong>{instrument.canonical_symbol}</strong>
+            <span>{instrument.display_name}</span>
+          </div>
+        </div>
+        <div className="fundamentals-price">
+          <span>Latest price</span>
+          <strong>{latestPrice ? formatMoneyValue(latestPrice.close_price, latestPrice.currency) : 'No cached price'}</strong>
+          <small>{latestPrice ? formatTimestamp(latestPrice.observed_at) : 'Awaiting price series'}</small>
+        </div>
+        <div className="fundamentals-meta">
+          <ContractItem label="Asset" value={assetTypeLabel(instrument.asset_class)} />
+          <ContractItem label="Issuer" value={instrument.issuer_name || '-'} />
+          <ContractItem label="Region" value={instrument.region} />
+        </div>
+      </div>
+
+      {hasRows ? (
+        <div className="fundamentals-data-grid">
+          <FundamentalsFinancialCard financial={latestFinancial} />
+          <FundamentalsRatiosCard ratios={latestRatios} />
+          <FundamentalsRatingsCard ratings={ratings} />
+          <FundamentalsYieldCurveCard points={curvePoints} />
+        </div>
+      ) : (
+        <div className="usage-empty">
+          <Landmark size={20} />
+          <span>Cached fundamentals have not been fetched for this instrument yet.</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FundamentalsFinancialCard({ financial }: { financial: CompanyFinancial | null }) {
+  return (
+    <div className="fundamentals-card">
+      <div className="fundamentals-card__header">
+        <Building2 size={18} />
+        <strong>Financials</strong>
+        <span>{financial ? financial.fiscal_period_end : '-'}</span>
+      </div>
+      <div className="fundamentals-stat-grid">
+        <FundamentalStat label="Revenue" value={formatMoneyValue(financial?.revenue, financial?.currency)} />
+        <FundamentalStat label="Net income" value={formatMoneyValue(financial?.net_income, financial?.currency)} />
+        <FundamentalStat label="EBITDA" value={formatMoneyValue(financial?.ebitda, financial?.currency)} />
+        <FundamentalStat label="Free cash flow" value={formatMoneyValue(financial?.free_cash_flow, financial?.currency)} />
+      </div>
+    </div>
+  );
+}
+
+function FundamentalsRatiosCard({ ratios }: { ratios: KeyRatios | null }) {
+  return (
+    <div className="fundamentals-card">
+      <div className="fundamentals-card__header">
+        <Percent size={18} />
+        <strong>Key Ratios</strong>
+        <span>{ratios ? ratios.as_of_date : '-'}</span>
+      </div>
+      <div className="fundamentals-stat-grid">
+        <FundamentalStat label="P/E" value={formatRatio(ratios?.pe_ratio)} />
+        <FundamentalStat label="P/B" value={formatRatio(ratios?.pb_ratio)} />
+        <FundamentalStat label="ROE" value={formatPercent(ratios?.return_on_equity)} />
+        <FundamentalStat label="Debt/equity" value={formatRatio(ratios?.debt_to_equity)} />
+      </div>
+    </div>
+  );
+}
+
+function FundamentalsRatingsCard({ ratings }: { ratings: CreditRating[] }) {
+  return (
+    <div className="fundamentals-card">
+      <div className="fundamentals-card__header">
+        <ShieldCheck size={18} />
+        <strong>Credit Ratings</strong>
+        <span>{ratings.length || '-'}</span>
+      </div>
+      {ratings.length > 0 ? (
+        <div className="fundamentals-list">
+          {ratings.slice(0, 4).map((rating) => (
+            <div className="fundamentals-list-row" key={`${rating.agency}-${rating.rating_type}`}>
+              <span>{rating.agency}</span>
+              <strong>{rating.rating}</strong>
+              <small>{rating.outlook || rating.rating_type}</small>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="fundamentals-empty">No ratings cached</div>
+      )}
+    </div>
+  );
+}
+
+function FundamentalsYieldCurveCard({ points }: { points: BondYieldCurvePoint[] }) {
+  const latestObservedAt = points[0]?.observed_at ?? null;
+  const visiblePoints = points.slice(0, 6);
+
+  return (
+    <div className="fundamentals-card">
+      <div className="fundamentals-card__header">
+        <Landmark size={18} />
+        <strong>Yield Curve</strong>
+        <span>{latestObservedAt ? formatTimestamp(latestObservedAt) : '-'}</span>
+      </div>
+      {visiblePoints.length > 0 ? (
+        <div className="yield-curve-bars">
+          {visiblePoints.map((point) => (
+            <div className="yield-curve-bar" key={`${point.curve_name}-${point.tenor_months}-${point.observed_at}`}>
+              <span>{formatTenor(point.tenor_months)}</span>
+              <strong>{formatPercent(point.yield_percent)}</strong>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="fundamentals-empty">No yield curve cached</div>
+      )}
+    </div>
+  );
+}
+
+function FundamentalStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="fundamental-stat">
+      <span>{label}</span>
+      <strong>{value}</strong>
     </div>
   );
 }
@@ -1388,11 +1655,46 @@ function formatLatestPrice(candidate: InstrumentCandidate) {
     return '-';
   }
 
-  const price = Number(latestPrice.close_price);
-  const renderedPrice = Number.isFinite(price)
-    ? price.toLocaleString(undefined, { maximumFractionDigits: 4 })
-    : latestPrice.close_price;
-  return `${latestPrice.currency || candidate.currency || ''} ${renderedPrice}`.trim();
+  return formatMoneyValue(latestPrice.close_price, latestPrice.currency || candidate.currency);
+}
+
+function formatMoneyValue(value: string | null | undefined, currency?: string | null) {
+  if (!value) {
+    return '-';
+  }
+  const numericValue = Number(value);
+  const renderedValue = Number.isFinite(numericValue)
+    ? numericValue.toLocaleString(undefined, { maximumFractionDigits: 2 })
+    : value;
+  return `${currency || ''} ${renderedValue}`.trim();
+}
+
+function formatRatio(value: string | null | undefined) {
+  if (!value) {
+    return '-';
+  }
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue)
+    ? numericValue.toLocaleString(undefined, { maximumFractionDigits: 2 })
+    : value;
+}
+
+function formatPercent(value: string | null | undefined) {
+  if (!value) {
+    return '-';
+  }
+  const numericValue = Number(value);
+  const renderedValue = Number.isFinite(numericValue)
+    ? numericValue.toLocaleString(undefined, { maximumFractionDigits: 2 })
+    : value;
+  return `${renderedValue}%`;
+}
+
+function formatTenor(months: number) {
+  if (months >= 12 && months % 12 === 0) {
+    return `${months / 12}Y`;
+  }
+  return `${months}M`;
 }
 
 function chartBars(instrument: InstrumentCandidate) {

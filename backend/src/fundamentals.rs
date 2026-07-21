@@ -1,5 +1,11 @@
 #![allow(dead_code)]
 
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    routing::get,
+    Json, Router,
+};
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -13,7 +19,16 @@ use crate::{
         ProviderCompanyFinancial, ProviderCreditRating, ProviderFundamentalsSnapshot,
         ProviderInstrumentRef, ProviderKeyRatios,
     },
+    state::AppState,
 };
+
+const DEFAULT_LIMIT: i64 = 4;
+const MAX_LIMIT: i64 = 12;
+const MAX_SYMBOL_LENGTH: usize = 64;
+
+pub fn router() -> Router<AppState> {
+    Router::new().route("/fundamentals", get(fundamentals_panel))
+}
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize, PartialEq)]
 pub struct CompanyFinancial {
@@ -91,6 +106,114 @@ pub struct KeyRatios {
     pub source_updated_at: Option<DateTime<Utc>>,
     pub fetched_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FundamentalsParams {
+    instrument_id: Option<i64>,
+    symbol: Option<String>,
+    provider: Option<String>,
+    limit: Option<i64>,
+}
+
+impl FundamentalsParams {
+    fn validate(&self) -> Result<ValidatedFundamentalsQuery, FundamentalsApiError> {
+        let instrument_id = validate_optional_instrument_id(self.instrument_id)?;
+        let symbol = normalize_symbol(self.symbol.as_deref())?;
+
+        if instrument_id.is_none() && symbol.is_none() {
+            return Err(FundamentalsApiError::MissingInstrumentSelector);
+        }
+
+        Ok(ValidatedFundamentalsQuery {
+            instrument_id,
+            symbol,
+            provider: normalize_provider(self.provider.as_deref()),
+            limit: self.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT),
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ValidatedFundamentalsQuery {
+    instrument_id: Option<i64>,
+    symbol: Option<String>,
+    provider: Option<String>,
+    limit: i64,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct FundamentalsResponse {
+    query: AppliedFundamentalsQuery,
+    instrument: FundamentalsInstrument,
+    latest_price: Option<FundamentalsLatestPrice>,
+    company_financials: Vec<CompanyFinancial>,
+    key_ratios: Vec<KeyRatios>,
+    credit_ratings: Vec<CreditRating>,
+    bond_yield_curve_points: Vec<BondYieldCurvePoint>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct AppliedFundamentalsQuery {
+    instrument_id: Option<i64>,
+    symbol: Option<String>,
+    provider: Option<String>,
+    limit: i64,
+}
+
+impl From<&ValidatedFundamentalsQuery> for AppliedFundamentalsQuery {
+    fn from(query: &ValidatedFundamentalsQuery) -> Self {
+        Self {
+            instrument_id: query.instrument_id,
+            symbol: query.symbol.clone(),
+            provider: query.provider.clone(),
+            limit: query.limit,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct FundamentalsInstrument {
+    id: i64,
+    canonical_symbol: String,
+    display_name: String,
+    asset_class: String,
+    region: String,
+    country: Option<String>,
+    currency: Option<String>,
+    exchange: Option<String>,
+    issuer_name: Option<String>,
+    issuer_region: Option<String>,
+    maturity_date: Option<NaiveDate>,
+    status: String,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct FundamentalsLatestPrice {
+    close_price: Decimal,
+    observed_at: DateTime<Utc>,
+    currency: Option<String>,
+}
+
+#[derive(Debug, FromRow)]
+struct FundamentalsInstrumentRow {
+    id: i64,
+    canonical_symbol: String,
+    display_name: String,
+    asset_class: String,
+    region: String,
+    country: Option<String>,
+    currency: Option<String>,
+    exchange: Option<String>,
+    issuer_name: Option<String>,
+    issuer_region: Option<String>,
+    maturity_date: Option<NaiveDate>,
+    status: String,
+    updated_at: DateTime<Utc>,
+    latest_close_price: Option<Decimal>,
+    latest_price_observed_at: Option<DateTime<Utc>>,
+    latest_price_currency: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -176,6 +299,185 @@ pub async fn persist_snapshot(
         credit_ratings,
         key_ratios,
     })
+}
+
+async fn fundamentals_panel(
+    State(state): State<AppState>,
+    Query(params): Query<FundamentalsParams>,
+) -> Result<Json<FundamentalsResponse>, (StatusCode, Json<FundamentalsErrorResponse>)> {
+    let query = params.validate().map_err(fundamentals_error_response)?;
+    let instrument_row = fetch_instrument(&state, &query)
+        .await
+        .map_err(FundamentalsApiError::Database)
+        .map_err(fundamentals_error_response)?
+        .ok_or(FundamentalsApiError::InstrumentNotFound)
+        .map_err(fundamentals_error_response)?;
+    let instrument_id = instrument_row.id;
+    let latest_price = latest_price_from_row(&instrument_row);
+    let instrument = FundamentalsInstrument::from(instrument_row);
+
+    let company_financials = fetch_company_financials(&state, instrument_id, &query)
+        .await
+        .map_err(FundamentalsApiError::Database)
+        .map_err(fundamentals_error_response)?;
+    let key_ratios = fetch_key_ratios(&state, instrument_id, &query)
+        .await
+        .map_err(FundamentalsApiError::Database)
+        .map_err(fundamentals_error_response)?;
+    let credit_ratings = fetch_credit_ratings(&state, instrument_id, &query)
+        .await
+        .map_err(FundamentalsApiError::Database)
+        .map_err(fundamentals_error_response)?;
+    let bond_yield_curve_points = fetch_bond_yield_curve_points(&state, instrument_id, &query)
+        .await
+        .map_err(FundamentalsApiError::Database)
+        .map_err(fundamentals_error_response)?;
+
+    Ok(Json(FundamentalsResponse {
+        query: AppliedFundamentalsQuery::from(&query),
+        instrument,
+        latest_price,
+        company_financials,
+        key_ratios,
+        credit_ratings,
+        bond_yield_curve_points,
+    }))
+}
+
+async fn fetch_instrument(
+    state: &AppState,
+    query: &ValidatedFundamentalsQuery,
+) -> Result<Option<FundamentalsInstrumentRow>, sqlx::Error> {
+    sqlx::query_as::<_, FundamentalsInstrumentRow>(
+        r#"
+        SELECT
+            i.id,
+            i.canonical_symbol,
+            i.display_name,
+            i.asset_class,
+            i.region,
+            i.country,
+            i.currency,
+            i.exchange,
+            i.issuer_name,
+            i.issuer_region,
+            i.maturity_date,
+            i.status,
+            i.updated_at,
+            latest_price.close_price AS latest_close_price,
+            latest_price.observed_at AS latest_price_observed_at,
+            latest_price.currency AS latest_price_currency
+        FROM instruments i
+        LEFT JOIN LATERAL (
+            SELECT
+                p.close_price,
+                p.observed_at,
+                s.currency
+            FROM price_series_cache s
+            INNER JOIN price_series_points p ON p.series_id = s.id
+            WHERE lower(s.symbol) = lower(i.canonical_symbol)
+                AND s.asset_class = i.asset_class
+            ORDER BY p.observed_at DESC
+            LIMIT 1
+        ) latest_price ON TRUE
+        WHERE ($1::BIGINT IS NULL OR i.id = $1)
+            AND ($2::TEXT IS NULL OR lower(i.canonical_symbol) = lower($2))
+        ORDER BY i.updated_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(query.instrument_id)
+    .bind(query.symbol.as_deref())
+    .fetch_optional(state.database().pool())
+    .await
+}
+
+async fn fetch_company_financials(
+    state: &AppState,
+    instrument_id: i64,
+    query: &ValidatedFundamentalsQuery,
+) -> Result<Vec<CompanyFinancial>, sqlx::Error> {
+    sqlx::query_as::<_, CompanyFinancial>(
+        r#"
+        SELECT *
+        FROM company_financials
+        WHERE instrument_id = $1
+            AND ($2::TEXT IS NULL OR provider = $2)
+        ORDER BY fiscal_period_end DESC, fetched_at DESC
+        LIMIT $3
+        "#,
+    )
+    .bind(instrument_id)
+    .bind(query.provider.as_deref())
+    .bind(query.limit)
+    .fetch_all(state.database().pool())
+    .await
+}
+
+async fn fetch_key_ratios(
+    state: &AppState,
+    instrument_id: i64,
+    query: &ValidatedFundamentalsQuery,
+) -> Result<Vec<KeyRatios>, sqlx::Error> {
+    sqlx::query_as::<_, KeyRatios>(
+        r#"
+        SELECT *
+        FROM key_ratios
+        WHERE instrument_id = $1
+            AND ($2::TEXT IS NULL OR provider = $2)
+        ORDER BY as_of_date DESC, fetched_at DESC
+        LIMIT $3
+        "#,
+    )
+    .bind(instrument_id)
+    .bind(query.provider.as_deref())
+    .bind(query.limit)
+    .fetch_all(state.database().pool())
+    .await
+}
+
+async fn fetch_credit_ratings(
+    state: &AppState,
+    instrument_id: i64,
+    query: &ValidatedFundamentalsQuery,
+) -> Result<Vec<CreditRating>, sqlx::Error> {
+    sqlx::query_as::<_, CreditRating>(
+        r#"
+        SELECT *
+        FROM credit_ratings
+        WHERE instrument_id = $1
+            AND ($2::TEXT IS NULL OR provider = $2)
+        ORDER BY agency ASC, rating_type ASC, fetched_at DESC
+        LIMIT $3
+        "#,
+    )
+    .bind(instrument_id)
+    .bind(query.provider.as_deref())
+    .bind(query.limit)
+    .fetch_all(state.database().pool())
+    .await
+}
+
+async fn fetch_bond_yield_curve_points(
+    state: &AppState,
+    instrument_id: i64,
+    query: &ValidatedFundamentalsQuery,
+) -> Result<Vec<BondYieldCurvePoint>, sqlx::Error> {
+    sqlx::query_as::<_, BondYieldCurvePoint>(
+        r#"
+        SELECT *
+        FROM bond_yield_curve_points
+        WHERE instrument_id = $1
+            AND ($2::TEXT IS NULL OR provider = $2)
+        ORDER BY observed_at DESC, tenor_months ASC
+        LIMIT $3
+        "#,
+    )
+    .bind(instrument_id)
+    .bind(query.provider.as_deref())
+    .bind(query.limit * 6)
+    .fetch_all(state.database().pool())
+    .await
 }
 
 async fn upsert_company_financial(
@@ -438,6 +740,32 @@ fn validate_instrument_id(instrument_id: i64) -> Result<(), FundamentalsError> {
     }
 }
 
+fn validate_optional_instrument_id(
+    instrument_id: Option<i64>,
+) -> Result<Option<i64>, FundamentalsApiError> {
+    match instrument_id {
+        Some(value) if value <= 0 => Err(FundamentalsApiError::InvalidInstrumentId),
+        value => Ok(value),
+    }
+}
+
+fn normalize_symbol(value: Option<&str>) -> Result<Option<String>, FundamentalsApiError> {
+    let Some(symbol) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if symbol.len() > MAX_SYMBOL_LENGTH {
+        return Err(FundamentalsApiError::SymbolTooLong);
+    }
+    Ok(Some(symbol.to_ascii_uppercase()))
+}
+
+fn normalize_provider(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn normalize_period_type(value: &str) -> Result<String, FundamentalsError> {
     let normalized = value
         .trim()
@@ -473,6 +801,37 @@ fn normalize_upper_optional(value: Option<String>) -> Option<String> {
     normalize_optional(value).map(|value| value.to_ascii_uppercase())
 }
 
+fn latest_price_from_row(row: &FundamentalsInstrumentRow) -> Option<FundamentalsLatestPrice> {
+    match (row.latest_close_price, row.latest_price_observed_at) {
+        (Some(close_price), Some(observed_at)) => Some(FundamentalsLatestPrice {
+            close_price,
+            observed_at,
+            currency: row.latest_price_currency.clone(),
+        }),
+        _ => None,
+    }
+}
+
+impl From<FundamentalsInstrumentRow> for FundamentalsInstrument {
+    fn from(row: FundamentalsInstrumentRow) -> Self {
+        Self {
+            id: row.id,
+            canonical_symbol: row.canonical_symbol,
+            display_name: row.display_name,
+            asset_class: row.asset_class,
+            region: row.region,
+            country: row.country,
+            currency: row.currency,
+            exchange: row.exchange,
+            issuer_name: row.issuer_name,
+            issuer_region: row.issuer_region,
+            maturity_date: row.maturity_date,
+            status: row.status,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum FundamentalsError {
     #[error("instrument_id must be a positive integer")]
@@ -499,12 +858,81 @@ pub enum FundamentalsError {
     Database(#[from] sqlx::Error),
 }
 
+#[derive(Debug, Error)]
+enum FundamentalsApiError {
+    #[error("instrument_id or symbol is required")]
+    MissingInstrumentSelector,
+    #[error("instrument_id must be a positive integer")]
+    InvalidInstrumentId,
+    #[error("symbol cannot exceed 64 characters")]
+    SymbolTooLong,
+    #[error("instrument fundamentals were not found")]
+    InstrumentNotFound,
+    #[error("fundamentals query failed: {0}")]
+    Database(#[source] sqlx::Error),
+}
+
+impl FundamentalsApiError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            Self::MissingInstrumentSelector | Self::InvalidInstrumentId | Self::SymbolTooLong => {
+                StatusCode::BAD_REQUEST
+            }
+            Self::InstrumentNotFound => StatusCode::NOT_FOUND,
+            Self::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    fn code(&self) -> &'static str {
+        match self {
+            Self::MissingInstrumentSelector => "missing_instrument_selector",
+            Self::InvalidInstrumentId => "invalid_instrument_id",
+            Self::SymbolTooLong => "symbol_too_long",
+            Self::InstrumentNotFound => "instrument_not_found",
+            Self::Database(_) => "fundamentals_query_failed",
+        }
+    }
+
+    fn public_message(&self) -> String {
+        match self {
+            Self::Database(_) => "fundamentals are temporarily unavailable".to_owned(),
+            _ => self.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct FundamentalsErrorResponse {
+    error: &'static str,
+    message: String,
+}
+
+fn fundamentals_error_response(
+    error: FundamentalsApiError,
+) -> (StatusCode, Json<FundamentalsErrorResponse>) {
+    if matches!(error, FundamentalsApiError::Database(_)) {
+        tracing::error!(%error, "fundamentals query failed");
+    }
+
+    (
+        error.status_code(),
+        Json(FundamentalsErrorResponse {
+            error: error.code(),
+            message: error.public_message(),
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
     use rust_decimal::Decimal;
 
-    use super::{normalize_period_type, validate_instrument_id, FundamentalsError};
+    use super::{
+        normalize_period_type, normalize_symbol, validate_instrument_id,
+        validate_optional_instrument_id, FundamentalsApiError, FundamentalsError,
+        FundamentalsParams, ValidatedFundamentalsQuery,
+    };
     use crate::market_data::ProviderBondYieldCurvePoint;
 
     #[test]
@@ -554,5 +982,44 @@ mod tests {
             normalize_period_type(" annual ").expect("annual should be valid"),
             "annual"
         );
+    }
+
+    #[test]
+    fn validates_fundamentals_api_selector() {
+        let params = FundamentalsParams {
+            instrument_id: Some(42),
+            symbol: None,
+            provider: Some(" provider-a ".to_owned()),
+            limit: Some(99),
+        };
+
+        assert_eq!(
+            params.validate().expect("selector should be valid"),
+            ValidatedFundamentalsQuery {
+                instrument_id: Some(42),
+                symbol: None,
+                provider: Some("provider-a".to_owned()),
+                limit: 12,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_missing_and_invalid_fundamentals_selectors() {
+        let params = FundamentalsParams {
+            instrument_id: None,
+            symbol: None,
+            provider: None,
+            limit: None,
+        };
+        assert!(matches!(
+            params.validate(),
+            Err(FundamentalsApiError::MissingInstrumentSelector)
+        ));
+        assert!(matches!(
+            validate_optional_instrument_id(Some(-1)),
+            Err(FundamentalsApiError::InvalidInstrumentId)
+        ));
+        assert!(normalize_symbol(Some("SPY")).is_ok());
     }
 }
