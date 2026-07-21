@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   BarChart3,
+  Bookmark,
   Building2,
   CheckCircle2,
   CircleAlert,
@@ -12,6 +13,7 @@ import {
   LogIn,
   MailCheck,
   Percent,
+  Plus,
   RadioTower,
   RefreshCw,
   Search as SearchIcon,
@@ -19,6 +21,7 @@ import {
   SlidersHorizontal,
   Target,
   TrendingUp,
+  Trash2,
   UserPlus,
   Wifi,
   WifiOff,
@@ -29,13 +32,19 @@ import { AppShell } from './components/AppShell';
 import { OverlayComparisonChart } from './components/OverlayComparisonChart';
 import { Panel } from './components/Panel';
 import {
+  addWatchlistItem,
+  createWatchlist,
+  deleteWatchlist,
   filterInstruments,
   loadFundamentals,
   loadMostPopular,
   loadMostViewed,
   loadTimeframeSeries,
+  loadWatchlists,
   recordInstrumentView,
+  removeWatchlistItem,
   searchInstruments,
+  updateWatchlist,
   type AssetType,
   type BondYieldCurvePoint,
   type CompanyFinancial,
@@ -45,7 +54,8 @@ import {
   type InstrumentDiscoveryFilters,
   type KeyRatios,
   type PopularInstrumentEntry,
-  type ViewHistoryEntry
+  type ViewHistoryEntry,
+  type Watchlist
 } from './instruments';
 import {
   useRealtimeMarketData,
@@ -430,6 +440,12 @@ function AuthenticatedDashboard({
         onToggleSymbol={handleToggleSymbol}
       />
 
+      <WatchlistPanel
+        activeInstrument={activeInstrument}
+        onSelectInstrument={handleOpenInstrument}
+        onSetSymbols={handleSetSymbols}
+      />
+
       <OverlayComparisonChart
         candidateSymbols={candidateSymbols}
         selectedSymbols={selectedSymbols}
@@ -795,6 +811,354 @@ function InstrumentPickerPanel({
         )}
       </div>
     </Panel>
+  );
+}
+
+type WatchlistPanelState =
+  | { status: 'loading'; message: string }
+  | { status: 'ready'; message: string }
+  | { status: 'saving'; message: string }
+  | { status: 'error'; message: string };
+
+function WatchlistPanel({
+  activeInstrument,
+  onSelectInstrument,
+  onSetSymbols
+}: {
+  activeInstrument: InstrumentCandidate | null;
+  onSelectInstrument: (instrument: InstrumentCandidate) => void;
+  onSetSymbols: (symbols: string[]) => void;
+}) {
+  const [watchlists, setWatchlists] = useState<Watchlist[]>([]);
+  const [selectedWatchlistId, setSelectedWatchlistId] = useState<number | null>(null);
+  const [newWatchlistName, setNewWatchlistName] = useState('Core watchlist');
+  const [renameValue, setRenameValue] = useState('');
+  const [state, setState] = useState<WatchlistPanelState>({
+    status: 'loading',
+    message: 'Loading watchlists'
+  });
+  const selectedWatchlist = useMemo(
+    () => watchlists.find((watchlist) => watchlist.id === selectedWatchlistId) ?? watchlists[0] ?? null,
+    [selectedWatchlistId, watchlists]
+  );
+  const activeInstrumentSaved = Boolean(
+    activeInstrument &&
+      selectedWatchlist?.items.some((item) => item.instrument_id === activeInstrument.id)
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    setState({ status: 'loading', message: 'Loading watchlists' });
+    loadWatchlists()
+      .then((response) => {
+        if (cancelled) {
+          return;
+        }
+        setWatchlists(response.results);
+        setSelectedWatchlistId((current) =>
+          response.results.some((watchlist) => watchlist.id === current)
+            ? current
+            : response.results[0]?.id ?? null
+        );
+        setState({ status: 'ready', message: `${response.count} watchlists` });
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setWatchlists([]);
+        setSelectedWatchlistId(null);
+        setState({
+          status: 'error',
+          message: error instanceof Error ? error.message : 'Watchlists unavailable'
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    setRenameValue(selectedWatchlist?.name ?? '');
+  }, [selectedWatchlist?.id, selectedWatchlist?.name]);
+
+  function replaceWatchlist(nextWatchlist: Watchlist) {
+    setWatchlists((current) => {
+      const exists = current.some((watchlist) => watchlist.id === nextWatchlist.id);
+      return exists
+        ? current.map((watchlist) => (watchlist.id === nextWatchlist.id ? nextWatchlist : watchlist))
+        : [nextWatchlist, ...current];
+    });
+    setSelectedWatchlistId(nextWatchlist.id);
+  }
+
+  async function handleCreateWatchlist() {
+    const name = newWatchlistName.trim();
+    if (!name) {
+      setState({ status: 'error', message: 'Watchlist name is required' });
+      return;
+    }
+    setState({ status: 'saving', message: 'Creating watchlist' });
+    try {
+      const response = await createWatchlist(name);
+      replaceWatchlist(response.watchlist);
+      setNewWatchlistName('Core watchlist');
+      setState({ status: 'ready', message: 'Watchlist created' });
+    } catch (error) {
+      setState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to create watchlist'
+      });
+    }
+  }
+
+  async function handleRenameWatchlist() {
+    if (!selectedWatchlist) {
+      return;
+    }
+    const name = renameValue.trim();
+    if (!name) {
+      setState({ status: 'error', message: 'Watchlist name is required' });
+      return;
+    }
+    setState({ status: 'saving', message: 'Renaming watchlist' });
+    try {
+      const response = await updateWatchlist(selectedWatchlist.id, name);
+      replaceWatchlist(response.watchlist);
+      setState({ status: 'ready', message: 'Watchlist renamed' });
+    } catch (error) {
+      setState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to rename watchlist'
+      });
+    }
+  }
+
+  async function handleDeleteWatchlist() {
+    if (!selectedWatchlist) {
+      return;
+    }
+    setState({ status: 'saving', message: 'Deleting watchlist' });
+    try {
+      await deleteWatchlist(selectedWatchlist.id);
+      setWatchlists((current) => {
+        const next = current.filter((watchlist) => watchlist.id !== selectedWatchlist.id);
+        setSelectedWatchlistId(next[0]?.id ?? null);
+        return next;
+      });
+      setState({ status: 'ready', message: 'Watchlist deleted' });
+    } catch (error) {
+      setState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to delete watchlist'
+      });
+    }
+  }
+
+  async function handleAddActiveInstrument() {
+    if (!selectedWatchlist || !activeInstrument) {
+      return;
+    }
+    setState({ status: 'saving', message: `Adding ${activeInstrument.canonical_symbol}` });
+    try {
+      const response = await addWatchlistItem(selectedWatchlist.id, activeInstrument.id);
+      replaceWatchlist(response.watchlist);
+      setState({ status: 'ready', message: `${activeInstrument.canonical_symbol} saved` });
+    } catch (error) {
+      setState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to add instrument'
+      });
+    }
+  }
+
+  async function handleRemoveInstrument(instrumentId: number) {
+    if (!selectedWatchlist) {
+      return;
+    }
+    setState({ status: 'saving', message: 'Removing instrument' });
+    try {
+      await removeWatchlistItem(selectedWatchlist.id, instrumentId);
+      replaceWatchlist({
+        ...selectedWatchlist,
+        item_count: Math.max(0, selectedWatchlist.item_count - 1),
+        items: selectedWatchlist.items.filter((item) => item.instrument_id !== instrumentId)
+      });
+      setState({ status: 'ready', message: 'Instrument removed' });
+    } catch (error) {
+      setState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to remove instrument'
+      });
+    }
+  }
+
+  function loadWatchlistIntoChart() {
+    if (!selectedWatchlist) {
+      return;
+    }
+    onSetSymbols(selectedWatchlist.items.map((item) => item.instrument.canonical_symbol));
+    setState({ status: 'ready', message: 'Comparison set updated' });
+  }
+
+  return (
+    <Panel
+      title="Watchlists"
+      eyebrow="PERSISTENT"
+      className="dashboard-grid__wide"
+      actions={<WatchlistStatusPill state={state} />}
+    >
+      <div className="watchlist-panel">
+        <div className="watchlist-controls">
+          <label className="terminal-input-shell watchlist-controls__input">
+            <Bookmark size={16} />
+            <input
+              value={newWatchlistName}
+              onChange={(event) => setNewWatchlistName(event.target.value)}
+              placeholder="Watchlist name"
+            />
+          </label>
+          <button
+            className="terminal-button terminal-button--primary"
+            type="button"
+            onClick={handleCreateWatchlist}
+            disabled={state.status === 'saving'}
+          >
+            <Plus size={18} />
+            <span>Create</span>
+          </button>
+        </div>
+
+        <div className="watchlist-layout">
+          <div className="watchlist-tabs" aria-label="Saved watchlists">
+            {watchlists.length > 0 ? (
+              watchlists.map((watchlist) => (
+                <button
+                  className={selectedWatchlist?.id === watchlist.id ? 'watchlist-tab is-selected' : 'watchlist-tab'}
+                  key={watchlist.id}
+                  type="button"
+                  onClick={() => setSelectedWatchlistId(watchlist.id)}
+                  aria-pressed={selectedWatchlist?.id === watchlist.id}
+                >
+                  <Bookmark size={15} />
+                  <span>
+                    <strong>{watchlist.name}</strong>
+                    <small>{watchlist.item_count} instruments</small>
+                  </span>
+                </button>
+              ))
+            ) : (
+              <div className="watchlist-empty">
+                <Bookmark size={20} />
+                <span>No watchlists saved.</span>
+              </div>
+            )}
+          </div>
+
+          <div className="watchlist-detail">
+            {selectedWatchlist ? (
+              <>
+                <div className="watchlist-detail__toolbar">
+                  <label className="terminal-input-shell watchlist-detail__rename">
+                    <Bookmark size={16} />
+                    <input
+                      value={renameValue}
+                      onChange={(event) => setRenameValue(event.target.value)}
+                      placeholder="Rename watchlist"
+                    />
+                  </label>
+                  <button
+                    className="terminal-button"
+                    type="button"
+                    onClick={handleRenameWatchlist}
+                    disabled={state.status === 'saving' || renameValue.trim() === selectedWatchlist.name}
+                  >
+                    <CheckCircle2 size={18} />
+                    <span>Rename</span>
+                  </button>
+                  <button
+                    className="terminal-button"
+                    type="button"
+                    onClick={loadWatchlistIntoChart}
+                    disabled={selectedWatchlist.items.length === 0}
+                  >
+                    <BarChart3 size={18} />
+                    <span>Load chart</span>
+                  </button>
+                  <button
+                    className="terminal-button"
+                    type="button"
+                    onClick={handleAddActiveInstrument}
+                    disabled={!activeInstrument || activeInstrumentSaved || state.status === 'saving'}
+                  >
+                    <Plus size={18} />
+                    <span>{activeInstrumentSaved ? 'Saved' : 'Add active'}</span>
+                  </button>
+                  <button
+                    className="terminal-button"
+                    type="button"
+                    onClick={handleDeleteWatchlist}
+                    disabled={state.status === 'saving'}
+                  >
+                    <Trash2 size={18} />
+                    <span>Delete</span>
+                  </button>
+                </div>
+
+                {selectedWatchlist.items.length > 0 ? (
+                  <div className="watchlist-items">
+                    {selectedWatchlist.items.map((item) => (
+                      <div className="watchlist-item" key={item.instrument_id}>
+                        <button
+                          className="watchlist-item__body"
+                          type="button"
+                          onClick={() => onSelectInstrument(item.instrument)}
+                        >
+                          <strong>{item.instrument.canonical_symbol}</strong>
+                          <span>{item.instrument.display_name}</span>
+                          <small>{assetTypeLabel(item.instrument.asset_class)} / {item.instrument.region}</small>
+                        </button>
+                        <button
+                          className="watchlist-item__remove"
+                          type="button"
+                          onClick={() => handleRemoveInstrument(item.instrument_id)}
+                          aria-label={`Remove ${item.instrument.canonical_symbol} from ${selectedWatchlist.name}`}
+                          disabled={state.status === 'saving'}
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="watchlist-empty">
+                    <Bookmark size={20} />
+                    <span>Select an instrument and add it to this watchlist.</span>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="watchlist-empty watchlist-empty--tall">
+                <Bookmark size={22} />
+                <span>Create a watchlist to start saving instruments.</span>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+function WatchlistStatusPill({ state }: { state: WatchlistPanelState }) {
+  const tone = state.status === 'error' ? 'error' : state.status === 'saving' || state.status === 'loading' ? 'fallback' : 'open';
+
+  return (
+    <span className={`auth-pill auth-pill--${tone}`}>
+      {state.status === 'loading' || state.status === 'saving' ? <RefreshCw size={14} /> : <Bookmark size={14} />}
+      {state.message}
+    </span>
   );
 }
 

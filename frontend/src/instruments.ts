@@ -64,6 +64,43 @@ export type RecordViewResponse = {
   entry: ViewHistoryEntry;
 };
 
+export type WatchlistItem = {
+  instrument_id: number;
+  position: number;
+  notes: string | null;
+  added_at: string;
+  instrument: InstrumentSummary;
+};
+
+export type Watchlist = {
+  id: number;
+  name: string;
+  item_count: number;
+  created_at: string;
+  updated_at: string;
+  items: WatchlistItem[];
+};
+
+export type WatchlistsResponse = {
+  count: number;
+  results: Watchlist[];
+};
+
+export type WatchlistResponse = {
+  watchlist: Watchlist;
+};
+
+export type DeleteWatchlistResponse = {
+  status: 'deleted';
+  watchlist_id: number;
+};
+
+export type DeleteWatchlistItemResponse = {
+  status: 'deleted';
+  watchlist_id: number;
+  instrument_id: number;
+};
+
 export type PopularInstrumentEntry = {
   instrument_id: number;
   platform_rank: number;
@@ -292,6 +329,46 @@ export async function loadMostPopular(limit = 5): Promise<PopularInstrumentsResp
   return fetchJson<PopularInstrumentsResponse>(`/api/v1/instruments/popular?${params.toString()}`);
 }
 
+export async function loadWatchlists(): Promise<WatchlistsResponse> {
+  return fetchJson<WatchlistsResponse>('/api/v1/watchlists');
+}
+
+export async function createWatchlist(name: string): Promise<WatchlistResponse> {
+  return writeJson<WatchlistResponse>('/api/v1/watchlists', 'POST', { name });
+}
+
+export async function updateWatchlist(
+  watchlistId: number,
+  name: string
+): Promise<WatchlistResponse> {
+  return writeJson<WatchlistResponse>(`/api/v1/watchlists/${watchlistId}`, 'PATCH', { name });
+}
+
+export async function deleteWatchlist(watchlistId: number): Promise<DeleteWatchlistResponse> {
+  return writeJson<DeleteWatchlistResponse>(`/api/v1/watchlists/${watchlistId}`, 'DELETE');
+}
+
+export async function addWatchlistItem(
+  watchlistId: number,
+  instrumentId: number,
+  notes?: string
+): Promise<WatchlistResponse> {
+  return writeJson<WatchlistResponse>(`/api/v1/watchlists/${watchlistId}/items`, 'POST', {
+    instrument_id: instrumentId,
+    ...(notes?.trim() ? { notes: notes.trim() } : {})
+  });
+}
+
+export async function removeWatchlistItem(
+  watchlistId: number,
+  instrumentId: number
+): Promise<DeleteWatchlistItemResponse> {
+  return writeJson<DeleteWatchlistItemResponse>(
+    `/api/v1/watchlists/${watchlistId}/items/${instrumentId}`,
+    'DELETE'
+  );
+}
+
 export async function loadTimeframeSeries(
   query: TimeframeSeriesQuery
 ): Promise<TimeframeSeriesResponse> {
@@ -328,6 +405,28 @@ async function fetchJson<T>(path: string): Promise<T> {
   const response = await fetch(apiPath(path), {
     credentials: 'include',
     headers: { Accept: 'application/json' }
+  });
+
+  if (!response.ok) {
+    throw await parseProblem(response);
+  }
+
+  return (await response.json()) as T;
+}
+
+async function writeJson<T>(
+  path: string,
+  method: 'POST' | 'PATCH' | 'DELETE',
+  body?: unknown
+): Promise<T> {
+  const response = await fetch(apiPath(path), {
+    method,
+    credentials: 'include',
+    headers: {
+      Accept: 'application/json',
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' })
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) })
   });
 
   if (!response.ok) {
