@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::get,
     Json, Router,
@@ -9,6 +9,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use rust_decimal::{prelude::ToPrimitive, Decimal};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sqlx::FromRow;
 use thiserror::Error;
 
@@ -26,7 +27,13 @@ const MAX_COMPARISON_SYMBOLS: usize = 6;
 const MIN_PRICE_POINTS: usize = 8;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/estimator", get(estimator))
+    Router::new()
+        .route("/estimator", get(estimator))
+        .route(
+            "/estimator/reports",
+            get(estimator_report_history).post(generate_estimator_report),
+        )
+        .route("/estimator/reports/:report_id", get(estimator_report_detail))
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,6 +42,48 @@ struct EstimatorParams {
     symbol: Option<String>,
     comparison_symbols: Option<String>,
     interval: Option<String>,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EstimatorReportRequest {
+    instrument_id: Option<i64>,
+    symbol: Option<String>,
+    comparison_symbols: Option<Vec<String>>,
+    interval: Option<String>,
+    limit: Option<i64>,
+}
+
+impl EstimatorReportRequest {
+    fn validate(&self) -> Result<ValidatedEstimatorQuery, EstimatorError> {
+        if self.instrument_id.is_some_and(|id| id <= 0) {
+            return Err(EstimatorError::InvalidInstrumentId);
+        }
+        let symbol = normalize_optional(self.symbol.clone().unwrap_or_default())
+            .map(|symbol| symbol.to_ascii_uppercase());
+        if self.instrument_id.is_none() && symbol.is_none() {
+            return Err(EstimatorError::MissingInstrumentSelector);
+        }
+
+        Ok(ValidatedEstimatorQuery {
+            instrument_id: self.instrument_id,
+            symbol,
+            comparison_symbols: normalize_comparison_symbols(
+                self.comparison_symbols.clone().unwrap_or_default(),
+            ),
+            interval: normalize_interval(self.interval.as_deref().unwrap_or(DEFAULT_INTERVAL))?,
+            limit: self
+                .limit
+                .unwrap_or(DEFAULT_POINT_LIMIT)
+                .clamp(MIN_PRICE_POINTS as i64, MAX_POINT_LIMIT),
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct EstimatorReportHistoryParams {
+    instrument_id: Option<i64>,
+    symbol: Option<String>,
     limit: Option<i64>,
 }
 
@@ -200,6 +249,42 @@ struct NewsArticleRow {
     published_at: DateTime<Utc>,
 }
 
+#[derive(Debug, FromRow)]
+struct EstimatorReportRow {
+    id: i64,
+    instrument_id: i64,
+    symbol: String,
+    direction: String,
+    certainty_percentage: f64,
+    composite_score: f64,
+    model_name: String,
+    model_version: String,
+    query: Value,
+    reasons: Value,
+    report: Value,
+    generated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromRow)]
+struct PersistedReportNewsArticleRow {
+    news_article_id: i64,
+    sentiment_score: Option<f64>,
+    rank: i32,
+    title: String,
+    source_name: String,
+    source_url: String,
+    published_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromRow)]
+struct PersistedReportTrendRow {
+    trend_name: String,
+    trend_value: f64,
+    unit: String,
+    observed_at: Option<DateTime<Utc>>,
+    rank: i32,
+}
+
 #[derive(Debug, Clone)]
 struct PriceSignal {
     total_return: f64,
@@ -217,6 +302,73 @@ struct FundamentalSignal {
     leverage_score: f64,
 }
 
+#[derive(Debug, Serialize)]
+struct EstimatorReportHistoryResponse {
+    count: usize,
+    reports: Vec<EstimatorReportSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct EstimatorReportResponse {
+    report: EstimatorReportRecord,
+}
+
+#[derive(Debug, Serialize)]
+struct EstimatorReportSummary {
+    id: i64,
+    instrument_id: i64,
+    symbol: String,
+    direction: String,
+    certainty_percentage: f64,
+    composite_score: f64,
+    model_name: String,
+    model_version: String,
+    generated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct EstimatorReportRecord {
+    id: i64,
+    instrument_id: i64,
+    symbol: String,
+    direction: String,
+    certainty_percentage: f64,
+    composite_score: f64,
+    model_name: String,
+    model_version: String,
+    query: Value,
+    reasons: Value,
+    report: Value,
+    evidence_links: EstimatorReportEvidenceLinks,
+    generated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct EstimatorReportEvidenceLinks {
+    news_articles: Vec<PersistedReportNewsArticle>,
+    market_trends: Vec<PersistedReportTrend>,
+}
+
+#[derive(Debug, Serialize)]
+struct PersistedReportNewsArticle {
+    news_article_id: i64,
+    sentiment_score: Option<f64>,
+    rank: i32,
+    title: String,
+    source_name: String,
+    source_url: String,
+    published_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct PersistedReportTrend {
+    trend_name: String,
+    trend_value: f64,
+    unit: String,
+    observed_at: Option<DateTime<Utc>>,
+    rank: i32,
+}
+
 async fn estimator(
     State(state): State<AppState>,
     Query(params): Query<EstimatorParams>,
@@ -228,6 +380,63 @@ async fn estimator(
         .map_err(estimator_error_response)?;
 
     Ok(Json(response))
+}
+
+async fn generate_estimator_report(
+    State(state): State<AppState>,
+    Json(request): Json<EstimatorReportRequest>,
+) -> Result<Json<EstimatorReportResponse>, (StatusCode, Json<EstimatorErrorResponse>)> {
+    let query = request.validate().map_err(estimator_error_response)?;
+    let service = EstimatorService::new(state.database().clone());
+    let estimate = service
+        .estimate(query)
+        .await
+        .map_err(estimator_error_response)?;
+    let report = persist_estimator_report(state.database(), &estimate)
+        .await
+        .map_err(estimator_error_response)?;
+
+    Ok(Json(EstimatorReportResponse { report }))
+}
+
+async fn estimator_report_history(
+    State(state): State<AppState>,
+    Query(params): Query<EstimatorReportHistoryParams>,
+) -> Result<Json<EstimatorReportHistoryResponse>, (StatusCode, Json<EstimatorErrorResponse>)> {
+    if params.instrument_id.is_some_and(|id| id <= 0) {
+        return Err(estimator_error_response(EstimatorError::InvalidInstrumentId));
+    }
+    let symbol = normalize_optional(params.symbol.unwrap_or_default())
+        .map(|value| value.to_ascii_uppercase());
+    let limit = params.limit.unwrap_or(20).clamp(1, 100);
+    let reports = fetch_estimator_report_history(
+        state.database(),
+        params.instrument_id,
+        symbol.as_deref(),
+        limit,
+    )
+    .await
+    .map_err(estimator_error_response)?;
+
+    Ok(Json(EstimatorReportHistoryResponse {
+        count: reports.len(),
+        reports,
+    }))
+}
+
+async fn estimator_report_detail(
+    State(state): State<AppState>,
+    Path(report_id): Path<i64>,
+) -> Result<Json<EstimatorReportResponse>, (StatusCode, Json<EstimatorErrorResponse>)> {
+    if report_id <= 0 {
+        return Err(estimator_error_response(EstimatorError::InvalidReportId));
+    }
+    let report = fetch_estimator_report_detail(state.database(), report_id)
+        .await
+        .map_err(estimator_error_response)?
+        .ok_or_else(|| estimator_error_response(EstimatorError::ReportNotFound))?;
+
+    Ok(Json(EstimatorReportResponse { report }))
 }
 
 #[derive(Clone, Debug)]
@@ -318,6 +527,231 @@ impl EstimatorService {
 
         Some((primary.total_return - mean(&peer_average)).clamp(-1.0, 1.0))
     }
+}
+
+async fn persist_estimator_report(
+    database: &Database,
+    response: &EstimatorResponse,
+) -> Result<EstimatorReportRecord, EstimatorError> {
+    let query = serde_json::to_value(&response.query)?;
+    let reasons = serde_json::to_value(&response.reasons)?;
+    let report = serde_json::to_value(response)?;
+    let row = sqlx::query_as::<_, EstimatorReportRow>(
+        r#"
+        INSERT INTO estimator_reports (
+            instrument_id,
+            symbol,
+            direction,
+            certainty_percentage,
+            composite_score,
+            model_name,
+            model_version,
+            query,
+            reasons,
+            report
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        RETURNING
+            id,
+            instrument_id,
+            symbol,
+            direction,
+            certainty_percentage,
+            composite_score,
+            model_name,
+            model_version,
+            query,
+            reasons,
+            report,
+            generated_at
+        "#,
+    )
+    .bind(response.instrument.id)
+    .bind(response.instrument.canonical_symbol.as_str())
+    .bind(direction_slug(&response.direction))
+    .bind(response.certainty_percentage)
+    .bind(response.composite_score)
+    .bind(response.model.name)
+    .bind(response.model.version)
+    .bind(query)
+    .bind(reasons)
+    .bind(report)
+    .fetch_one(database.pool())
+    .await?;
+
+    for (index, article) in response.evidence.news_articles.iter().enumerate() {
+        sqlx::query(
+            r#"
+            INSERT INTO estimator_report_news_articles (
+                report_id,
+                news_article_id,
+                sentiment_score,
+                rank
+            )
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (report_id, news_article_id) DO NOTHING
+            "#,
+        )
+        .bind(row.id)
+        .bind(article.id)
+        .bind(article.sentiment_score)
+        .bind((index + 1) as i32)
+        .execute(database.pool())
+        .await?;
+    }
+
+    for (index, trend) in response.evidence.market_trends.iter().enumerate() {
+        sqlx::query(
+            r#"
+            INSERT INTO estimator_report_market_trends (
+                report_id,
+                trend_name,
+                trend_value,
+                unit,
+                observed_at,
+                rank
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (report_id, trend_name) DO NOTHING
+            "#,
+        )
+        .bind(row.id)
+        .bind(trend.name)
+        .bind(trend.value)
+        .bind(trend.unit)
+        .bind(trend.observed_at)
+        .bind((index + 1) as i32)
+        .execute(database.pool())
+        .await?;
+    }
+
+    fetch_estimator_report_detail(database, row.id)
+        .await?
+        .ok_or(EstimatorError::ReportNotFound)
+}
+
+async fn fetch_estimator_report_history(
+    database: &Database,
+    instrument_id: Option<i64>,
+    symbol: Option<&str>,
+    limit: i64,
+) -> Result<Vec<EstimatorReportSummary>, EstimatorError> {
+    let rows = sqlx::query_as::<_, EstimatorReportRow>(
+        r#"
+        SELECT
+            id,
+            instrument_id,
+            symbol,
+            direction,
+            certainty_percentage,
+            composite_score,
+            model_name,
+            model_version,
+            query,
+            reasons,
+            report,
+            generated_at
+        FROM estimator_reports
+        WHERE ($1::BIGINT IS NULL OR instrument_id = $1)
+            AND ($2::TEXT IS NULL OR lower(symbol) = lower($2))
+        ORDER BY generated_at DESC, id DESC
+        LIMIT $3
+        "#,
+    )
+    .bind(instrument_id)
+    .bind(symbol)
+    .bind(limit)
+    .fetch_all(database.pool())
+    .await?;
+
+    Ok(rows.into_iter().map(EstimatorReportSummary::from).collect())
+}
+
+async fn fetch_estimator_report_detail(
+    database: &Database,
+    report_id: i64,
+) -> Result<Option<EstimatorReportRecord>, EstimatorError> {
+    let Some(row) = sqlx::query_as::<_, EstimatorReportRow>(
+        r#"
+        SELECT
+            id,
+            instrument_id,
+            symbol,
+            direction,
+            certainty_percentage,
+            composite_score,
+            model_name,
+            model_version,
+            query,
+            reasons,
+            report,
+            generated_at
+        FROM estimator_reports
+        WHERE id = $1
+        "#,
+    )
+    .bind(report_id)
+    .fetch_optional(database.pool())
+    .await?
+    else {
+        return Ok(None);
+    };
+
+    let news_articles = sqlx::query_as::<_, PersistedReportNewsArticleRow>(
+        r#"
+        SELECT
+            l.news_article_id,
+            l.sentiment_score,
+            l.rank,
+            a.title,
+            a.source_name,
+            a.source_url,
+            a.published_at
+        FROM estimator_report_news_articles l
+        INNER JOIN news_articles a ON a.id = l.news_article_id
+        WHERE l.report_id = $1
+        ORDER BY l.rank ASC, a.published_at DESC
+        "#,
+    )
+    .bind(report_id)
+    .fetch_all(database.pool())
+    .await?;
+    let market_trends = sqlx::query_as::<_, PersistedReportTrendRow>(
+        r#"
+        SELECT trend_name, trend_value, unit, observed_at, rank
+        FROM estimator_report_market_trends
+        WHERE report_id = $1
+        ORDER BY rank ASC, trend_name ASC
+        "#,
+    )
+    .bind(report_id)
+    .fetch_all(database.pool())
+    .await?;
+
+    Ok(Some(EstimatorReportRecord {
+        id: row.id,
+        instrument_id: row.instrument_id,
+        symbol: row.symbol,
+        direction: row.direction,
+        certainty_percentage: row.certainty_percentage,
+        composite_score: row.composite_score,
+        model_name: row.model_name,
+        model_version: row.model_version,
+        query: row.query,
+        reasons: row.reasons,
+        report: row.report,
+        evidence_links: EstimatorReportEvidenceLinks {
+            news_articles: news_articles
+                .into_iter()
+                .map(PersistedReportNewsArticle::from)
+                .collect(),
+            market_trends: market_trends
+                .into_iter()
+                .map(PersistedReportTrend::from)
+                .collect(),
+        },
+        generated_at: row.generated_at,
+    }))
 }
 
 #[derive(Debug)]
@@ -699,6 +1133,14 @@ fn direction_from_score(score: f64) -> EstimatorDirection {
     }
 }
 
+fn direction_slug(direction: &EstimatorDirection) -> &'static str {
+    match direction {
+        EstimatorDirection::Bullish => "bullish",
+        EstimatorDirection::Bearish => "bearish",
+        EstimatorDirection::Neutral => "neutral",
+    }
+}
+
 fn with_primary_symbol(primary: &str, symbols: Vec<String>) -> Vec<String> {
     let mut combined = vec![primary.to_owned()];
     for symbol in symbols {
@@ -716,13 +1158,28 @@ fn parse_comparison_symbols(value: Option<&str>) -> Result<Vec<String>, Estimato
         let Some(symbol) = normalize_optional(raw.to_owned()) else {
             continue;
         };
-        let symbol = symbol.to_ascii_uppercase();
-        if !symbols.contains(&symbol) {
-            symbols.push(symbol);
-        }
+        push_unique_symbol(&mut symbols, symbol);
     }
     symbols.truncate(MAX_COMPARISON_SYMBOLS);
     Ok(symbols)
+}
+
+fn normalize_comparison_symbols(values: Vec<String>) -> Vec<String> {
+    let mut symbols = Vec::new();
+    for value in values {
+        if let Some(symbol) = normalize_optional(value) {
+            push_unique_symbol(&mut symbols, symbol);
+        }
+    }
+    symbols.truncate(MAX_COMPARISON_SYMBOLS);
+    symbols
+}
+
+fn push_unique_symbol(symbols: &mut Vec<String>, symbol: String) {
+    let symbol = symbol.to_ascii_uppercase();
+    if !symbols.contains(&symbol) {
+        symbols.push(symbol);
+    }
 }
 
 fn normalize_interval(value: &str) -> Result<String, EstimatorError> {
@@ -783,6 +1240,48 @@ impl From<EstimatorInstrumentRow> for EstimatorInstrument {
     }
 }
 
+impl From<EstimatorReportRow> for EstimatorReportSummary {
+    fn from(row: EstimatorReportRow) -> Self {
+        Self {
+            id: row.id,
+            instrument_id: row.instrument_id,
+            symbol: row.symbol,
+            direction: row.direction,
+            certainty_percentage: row.certainty_percentage,
+            composite_score: row.composite_score,
+            model_name: row.model_name,
+            model_version: row.model_version,
+            generated_at: row.generated_at,
+        }
+    }
+}
+
+impl From<PersistedReportNewsArticleRow> for PersistedReportNewsArticle {
+    fn from(row: PersistedReportNewsArticleRow) -> Self {
+        Self {
+            news_article_id: row.news_article_id,
+            sentiment_score: row.sentiment_score,
+            rank: row.rank,
+            title: row.title,
+            source_name: row.source_name,
+            source_url: row.source_url,
+            published_at: row.published_at,
+        }
+    }
+}
+
+impl From<PersistedReportTrendRow> for PersistedReportTrend {
+    fn from(row: PersistedReportTrendRow) -> Self {
+        Self {
+            trend_name: row.trend_name,
+            trend_value: row.trend_value,
+            unit: row.unit,
+            observed_at: row.observed_at,
+            rank: row.rank,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct EstimatorErrorResponse {
     error: &'static str,
@@ -797,8 +1296,12 @@ pub enum EstimatorError {
     MissingInstrumentSelector,
     #[error("invalid estimator interval")]
     InvalidInterval,
+    #[error("report id must be positive")]
+    InvalidReportId,
     #[error("instrument was not found")]
     InstrumentNotFound,
+    #[error("estimator report was not found")]
+    ReportNotFound,
     #[error("not enough cached price data to estimate")]
     InsufficientPriceData,
     #[error("price value cannot be represented as f64")]
@@ -809,6 +1312,8 @@ pub enum EstimatorError {
     Database(#[from] sqlx::Error),
     #[error("cross-asset analytics failed: {0}")]
     Analytics(#[from] AnalyticsError),
+    #[error("estimator report serialization failed: {0}")]
+    Serialize(#[from] serde_json::Error),
 }
 
 fn estimator_error_response(
@@ -817,12 +1322,18 @@ fn estimator_error_response(
     let (status, code) = match error {
         EstimatorError::InvalidInstrumentId
         | EstimatorError::MissingInstrumentSelector
-        | EstimatorError::InvalidInterval => (StatusCode::BAD_REQUEST, "invalid_estimator_query"),
+        | EstimatorError::InvalidInterval
+        | EstimatorError::InvalidReportId => (StatusCode::BAD_REQUEST, "invalid_estimator_query"),
         EstimatorError::InstrumentNotFound => (StatusCode::NOT_FOUND, "instrument_not_found"),
+        EstimatorError::ReportNotFound => (StatusCode::NOT_FOUND, "estimator_report_not_found"),
         EstimatorError::InsufficientPriceData
         | EstimatorError::InvalidDecimal
-        | EstimatorError::InvalidPrice => (StatusCode::UNPROCESSABLE_ENTITY, "insufficient_evidence"),
-        EstimatorError::Database(_) | EstimatorError::Analytics(_) => {
+        | EstimatorError::InvalidPrice => {
+            (StatusCode::UNPROCESSABLE_ENTITY, "insufficient_evidence")
+        }
+        EstimatorError::Database(_)
+        | EstimatorError::Analytics(_)
+        | EstimatorError::Serialize(_) => {
             (StatusCode::INTERNAL_SERVER_ERROR, "estimator_error")
         }
     };
