@@ -7,7 +7,10 @@ import {
   CircleAlert,
   Eye,
   ExternalLink,
+  FileText,
   Flame,
+  History,
+  Info,
   KeyRound,
   Landmark,
   ListFilter,
@@ -40,7 +43,10 @@ import {
   deleteAlertRule,
   deleteWatchlist,
   filterInstruments,
+  generateEstimatorReport,
   loadAlertRules,
+  loadEstimatorReport,
+  loadEstimatorReportHistory,
   loadFundamentals,
   loadMostPopular,
   loadMostViewed,
@@ -60,6 +66,8 @@ import {
   type BondYieldCurvePoint,
   type CompanyFinancial,
   type CreditRating,
+  type EstimatorReportRecord,
+  type EstimatorReportSummary,
   type FundamentalsResponse,
   type InstrumentCandidate,
   type InstrumentDiscoveryFilters,
@@ -487,6 +495,11 @@ function AuthenticatedDashboard({
       <FundamentalsPanel instrument={activeInstrument} />
 
       <NewsPanel instrument={activeInstrument} selectedSymbols={selectedSymbols} />
+
+      <EstimatorReportPanel
+        activeInstrument={activeInstrument}
+        selectedSymbols={selectedSymbols}
+      />
 
       <RealtimeConsole
         candidateSymbols={candidateSymbols}
@@ -2250,6 +2263,420 @@ function NewsContent({
   );
 }
 
+type EstimatorReportPanelState =
+  | {
+      status: 'idle';
+      report: EstimatorReportRecord | null;
+      history: EstimatorReportSummary[];
+      message: string;
+    }
+  | {
+      status: 'loading' | 'generating';
+      report: EstimatorReportRecord | null;
+      history: EstimatorReportSummary[];
+      message: string;
+    }
+  | {
+      status: 'ready';
+      report: EstimatorReportRecord | null;
+      history: EstimatorReportSummary[];
+      message: string;
+    }
+  | {
+      status: 'error';
+      report: EstimatorReportRecord | null;
+      history: EstimatorReportSummary[];
+      message: string;
+    };
+
+function EstimatorReportPanel({
+  activeInstrument,
+  selectedSymbols
+}: {
+  activeInstrument: InstrumentCandidate | null;
+  selectedSymbols: string[];
+}) {
+  const [state, setState] = useState<EstimatorReportPanelState>({
+    status: 'idle',
+    report: null,
+    history: [],
+    message: 'Select an instrument'
+  });
+  const comparisonSymbols = useMemo(() => {
+    if (!activeInstrument) {
+      return [];
+    }
+    return uniqueSymbols(selectedSymbols)
+      .filter((symbol) => symbol !== activeInstrument.canonical_symbol)
+      .slice(0, MAX_COMPARISON_SYMBOLS - 1);
+  }, [activeInstrument, selectedSymbols]);
+
+  useEffect(() => {
+    if (!activeInstrument) {
+      setState({ status: 'idle', report: null, history: [], message: 'Select an instrument' });
+      return;
+    }
+
+    let cancelled = false;
+    setState((current) => ({
+      status: 'loading',
+      report: current.report,
+      history: current.history,
+      message: `Loading ${activeInstrument.canonical_symbol} reports`
+    }));
+
+    loadEstimatorReportHistory({ instrumentId: activeInstrument.id, limit: 6 })
+      .then((response) => {
+        if (cancelled) {
+          return;
+        }
+        setState((current) => ({
+          status: 'ready',
+          report: current.report?.instrument_id === activeInstrument.id ? current.report : null,
+          history: response.reports,
+          message: response.count > 0 ? `${response.count} saved reports` : 'No saved reports'
+        }));
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setState((current) => ({
+          status: 'error',
+          report: current.report?.instrument_id === activeInstrument.id ? current.report : null,
+          history: [],
+          message: error instanceof Error ? error.message : 'Report history unavailable'
+        }));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeInstrument]);
+
+  async function handleGenerateReport() {
+    if (!activeInstrument) {
+      return;
+    }
+    setState((current) => ({
+      status: 'generating',
+      report: current.report,
+      history: current.history,
+      message: `Generating ${activeInstrument.canonical_symbol} report`
+    }));
+    try {
+      const response = await generateEstimatorReport({
+        instrumentId: activeInstrument.id,
+        comparisonSymbols,
+        interval: '1m',
+        limit: 180
+      });
+      const history = await loadEstimatorReportHistory({
+        instrumentId: activeInstrument.id,
+        limit: 6
+      });
+      setState({
+        status: 'ready',
+        report: response.report,
+        history: history.reports,
+        message: `Report #${response.report.id} saved`
+      });
+    } catch (error) {
+      setState((current) => ({
+        status: 'error',
+        report: current.report,
+        history: current.history,
+        message: error instanceof Error ? error.message : 'Unable to generate report'
+      }));
+    }
+  }
+
+  async function handleOpenReport(reportId: number) {
+    setState((current) => ({
+      status: 'loading',
+      report: current.report,
+      history: current.history,
+      message: `Loading report #${reportId}`
+    }));
+    try {
+      const response = await loadEstimatorReport(reportId);
+      setState((current) => ({
+        status: 'ready',
+        report: response.report,
+        history: current.history,
+        message: `Report #${response.report.id} loaded`
+      }));
+    } catch (error) {
+      setState((current) => ({
+        status: 'error',
+        report: current.report,
+        history: current.history,
+        message: error instanceof Error ? error.message : 'Unable to load report'
+      }));
+    }
+  }
+
+  return (
+    <Panel
+      title="Estimator Report"
+      eyebrow="INFORMATIONAL ARTIFACT"
+      className="dashboard-grid__wide"
+      actions={<EstimatorStatusPill state={state} />}
+    >
+      {!activeInstrument ? (
+        <div className="usage-empty">
+          <FileText size={20} />
+          <span>Select an instrument from Market Discovery to generate a report artifact.</span>
+        </div>
+      ) : (
+        <div className="estimator-report-panel">
+          <div className="estimator-report-toolbar">
+            <div className="estimator-report-context">
+              <FileText size={22} aria-hidden="true" />
+              <div>
+                <strong>{activeInstrument.canonical_symbol}</strong>
+                <span>{activeInstrument.display_name}</span>
+              </div>
+            </div>
+            <div className="estimator-report-peerline">
+              <span>Chart set</span>
+              <strong>
+                {uniqueSymbols([activeInstrument.canonical_symbol, ...comparisonSymbols]).join(' / ')}
+              </strong>
+            </div>
+            <button
+              className="terminal-button terminal-button--primary"
+              type="button"
+              onClick={handleGenerateReport}
+              disabled={state.status === 'generating'}
+            >
+              {state.status === 'generating' ? <RefreshCw size={18} /> : <FileText size={18} />}
+              <span>{state.status === 'generating' ? 'Generating' : 'Generate report'}</span>
+            </button>
+          </div>
+
+          <div className="estimator-disclaimer" role="note">
+            <Info size={18} />
+            <span>Informational only — not investment advice.</span>
+          </div>
+
+          {state.status === 'error' ? (
+            <div className="estimator-inline-error" role="alert">
+              <CircleAlert size={18} />
+              <span>{state.message}</span>
+            </div>
+          ) : null}
+
+          <div className="estimator-report-layout">
+            {state.report ? (
+              <EstimatorReportArtifact report={state.report} />
+            ) : (
+              <div className="usage-empty">
+                <FileText size={20} />
+                <span>No estimator report is open for {activeInstrument.canonical_symbol}.</span>
+              </div>
+            )}
+            <EstimatorReportHistory
+              history={state.history}
+              activeReportId={state.report?.id ?? null}
+              onOpenReport={handleOpenReport}
+            />
+          </div>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function EstimatorStatusPill({ state }: { state: EstimatorReportPanelState }) {
+  const tone = state.status === 'error' ? 'error' : state.status === 'loading' || state.status === 'generating' ? 'fallback' : 'open';
+
+  return (
+    <span className={`auth-pill auth-pill--${tone}`}>
+      {state.status === 'loading' || state.status === 'generating' ? (
+        <RefreshCw size={14} />
+      ) : (
+        <FileText size={14} />
+      )}
+      {state.message}
+    </span>
+  );
+}
+
+function EstimatorReportArtifact({ report }: { report: EstimatorReportRecord }) {
+  const generated = report.report;
+  const reasons = generated.reasons.length > 0 ? generated.reasons : report.reasons;
+  const marketTrends = report.evidence_links.market_trends.length > 0
+    ? report.evidence_links.market_trends
+    : generated.evidence.market_trends.map((trend, index) => ({
+        trend_name: trend.name,
+        trend_value: trend.value,
+        unit: trend.unit,
+        observed_at: trend.observed_at,
+        rank: index + 1
+      }));
+  const newsLinks = report.evidence_links.news_articles.length > 0
+    ? report.evidence_links.news_articles
+    : generated.evidence.news_articles.map((article, index) => ({
+        news_article_id: article.id,
+        sentiment_score: article.sentiment_score,
+        rank: index + 1,
+        title: article.title,
+        source_name: article.source_name,
+        source_url: article.source_url,
+        published_at: article.published_at
+      }));
+
+  return (
+    <article className="estimator-artifact" aria-label={`Estimator report ${report.id}`}>
+      <div className={`estimator-artifact__summary estimator-artifact__summary--${report.direction}`}>
+        <div>
+          <span>Certainty</span>
+          <strong>{formatCertainty(report.certainty_percentage)}</strong>
+        </div>
+        <div>
+          <span>Direction</span>
+          <strong>{report.direction}</strong>
+        </div>
+        <div>
+          <span>Generated</span>
+          <strong>{formatTimestamp(report.generated_at)}</strong>
+        </div>
+        <div>
+          <span>Composite</span>
+          <strong>{formatSignedNumber(report.composite_score)}</strong>
+        </div>
+      </div>
+
+      <div className="estimator-artifact__model">
+        <ContractItem label="Model" value={`${report.model_name} ${report.model_version}`} />
+        <ContractItem label="Source" value={generated.model.disclaimer} />
+      </div>
+
+      <div className="estimator-artifact__sections">
+        <section className="estimator-card" aria-label="Ranked reasons">
+          <div className="estimator-card__header">
+            <ListFilter size={18} />
+            <strong>Ranked Reasons</strong>
+            <span>{reasons.length || '-'}</span>
+          </div>
+          {reasons.length > 0 ? (
+            <div className="estimator-reasons">
+              {reasons.map((reason) => (
+                <div className="estimator-reason" key={`${reason.rank}-${reason.category}`}>
+                  <span className="estimator-reason__rank">#{reason.rank}</span>
+                  <span className="estimator-reason__body">
+                    <strong>{reason.label}</strong>
+                    <small>{reason.category} / weight {(reason.weight * 100).toFixed(0)}%</small>
+                  </span>
+                  <span className={reason.contribution >= 0 ? 'estimator-delta is-positive' : 'estimator-delta is-negative'}>
+                    {formatSignedNumber(reason.contribution)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="fundamentals-empty">No ranked reasons stored</div>
+          )}
+        </section>
+
+        <section className="estimator-card" aria-label="Market trends">
+          <div className="estimator-card__header">
+            <TrendingUp size={18} />
+            <strong>Market Trends</strong>
+            <span>{marketTrends.length || '-'}</span>
+          </div>
+          {marketTrends.length > 0 ? (
+            <div className="estimator-trends">
+              {marketTrends.map((trend) => (
+                <div className="estimator-trend" key={`${trend.rank}-${trend.trend_name}`}>
+                  <span>{trendLabel(trend.trend_name)}</span>
+                  <strong>{formatTrendValue(trend.trend_value, trend.unit)}</strong>
+                  <small>{trend.observed_at ? formatTimestamp(trend.observed_at) : '-'}</small>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="fundamentals-empty">No market trends stored</div>
+          )}
+        </section>
+      </div>
+
+      <section className="estimator-card estimator-card--news" aria-label="Linked news evidence">
+        <div className="estimator-card__header">
+          <Newspaper size={18} />
+          <strong>Linked News Evidence</strong>
+          <span>{newsLinks.length || '-'}</span>
+        </div>
+        {newsLinks.length > 0 ? (
+          <div className="estimator-news-links">
+            {newsLinks.map((article) => (
+              <a
+                className="estimator-news-link"
+                key={article.news_article_id}
+                href={article.source_url}
+                target="_blank"
+                rel="noreferrer"
+              >
+                <span className="estimator-news-link__source">{article.source_name}</span>
+                <strong>{article.title}</strong>
+                <span className="estimator-news-link__meta">
+                  {formatTimestamp(article.published_at)} / sentiment {formatSignedNumber(article.sentiment_score ?? 0)}
+                  <ExternalLink size={14} />
+                </span>
+              </a>
+            ))}
+          </div>
+        ) : (
+          <div className="fundamentals-empty">No linked news articles stored</div>
+        )}
+      </section>
+    </article>
+  );
+}
+
+function EstimatorReportHistory({
+  history,
+  activeReportId,
+  onOpenReport
+}: {
+  history: EstimatorReportSummary[];
+  activeReportId: number | null;
+  onOpenReport: (reportId: number) => void;
+}) {
+  return (
+    <aside className="estimator-history" aria-label="Estimator report history">
+      <div className="estimator-history__header">
+        <History size={18} />
+        <strong>History</strong>
+      </div>
+      {history.length > 0 ? (
+        <div className="estimator-history__list">
+          {history.map((entry) => (
+            <button
+              className={entry.id === activeReportId ? 'estimator-history-row is-active' : 'estimator-history-row'}
+              key={entry.id}
+              type="button"
+              onClick={() => onOpenReport(entry.id)}
+            >
+              <span>
+                <strong>#{entry.id}</strong>
+                <small>{formatTimestamp(entry.generated_at)}</small>
+              </span>
+              <span>
+                <strong>{formatCertainty(entry.certainty_percentage)}</strong>
+                <small>{entry.direction}</small>
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="fundamentals-empty">No saved reports</div>
+      )}
+    </aside>
+  );
+}
+
 function FundamentalsPanel({ instrument }: { instrument: InstrumentCandidate | null }) {
   const [state, setState] = useState<FundamentalsPanelState>({
     status: 'idle',
@@ -3037,6 +3464,41 @@ function formatSignedPercent(value: number) {
   }
   const renderedValue = formatPercentValue(Math.abs(value));
   return `${value >= 0 ? '+' : '-'}${renderedValue}`;
+}
+
+function formatCertainty(value: number) {
+  if (!Number.isFinite(value)) {
+    return '-';
+  }
+  return `${value.toLocaleString(undefined, { maximumFractionDigits: 1 })}%`;
+}
+
+function formatSignedNumber(value: number) {
+  if (!Number.isFinite(value)) {
+    return '-';
+  }
+  const renderedValue = Math.abs(value).toLocaleString(undefined, {
+    maximumFractionDigits: 4
+  });
+  return `${value >= 0 ? '+' : '-'}${renderedValue}`;
+}
+
+function trendLabel(value: string) {
+  return value
+    .split('_')
+    .filter(Boolean)
+    .map((part) => `${part[0]?.toUpperCase() ?? ''}${part.slice(1)}`)
+    .join(' ');
+}
+
+function formatTrendValue(value: number, unit: string) {
+  if (unit === 'ratio') {
+    return formatSignedPercent(value);
+  }
+  if (unit === 'price' || unit === 'volume') {
+    return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  }
+  return `${value.toLocaleString(undefined, { maximumFractionDigits: 4 })} ${unit}`;
 }
 
 function formatTenor(months: number) {
