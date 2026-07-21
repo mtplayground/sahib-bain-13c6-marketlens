@@ -300,6 +300,54 @@ export type FundamentalsResponse = {
   bond_yield_curve_points: BondYieldCurvePoint[];
 };
 
+export type NewsArticleInstrumentSummary = {
+  instrument_id: number;
+  canonical_symbol: string;
+  display_name: string;
+  asset_class: string;
+  relevance_score: string | null;
+  matched_symbol: string | null;
+};
+
+export type NewsArticle = {
+  id: number;
+  provider: string;
+  provider_article_id: string;
+  title: string;
+  summary: string | null;
+  body_excerpt: string | null;
+  source_name: string;
+  source_url: string;
+  author: string | null;
+  image_url: string | null;
+  language: string | null;
+  published_at: string;
+  source_updated_at: string | null;
+  fetched_at: string;
+  updated_at: string;
+  instruments: NewsArticleInstrumentSummary[];
+};
+
+export type NewsFeedResponse = {
+  query: {
+    instrument_id: number | null;
+    symbol: string | null;
+    provider: string | null;
+    source: string | null;
+    limit: number;
+  };
+  count: number;
+  results: NewsArticle[];
+};
+
+export type NewsFeedQuery = {
+  instrumentId?: number | null;
+  symbol?: string | null;
+  provider?: string;
+  source?: string;
+  limit?: number;
+};
+
 export type TimeframeSeriesQuery = {
   symbol?: string;
   instrumentId?: number;
@@ -465,6 +513,19 @@ export async function loadFundamentals(
   params.set('limit', String(limit));
 
   return fetchJson<FundamentalsResponse>(`/api/v1/fundamentals?${params.toString()}`);
+}
+
+export async function loadNewsFeed(query: NewsFeedQuery = {}): Promise<NewsFeedResponse> {
+  const params = new URLSearchParams();
+  if (query.instrumentId) {
+    params.set('instrument_id', String(query.instrumentId));
+  }
+  appendIfPresent(params, 'symbol', query.symbol ?? '');
+  appendIfPresent(params, 'provider', query.provider ?? '');
+  appendIfPresent(params, 'source', query.source ?? '');
+  params.set('limit', String(query.limit ?? 8));
+
+  return fetchJson<NewsFeedResponse>(`/api/v1/news?${params.toString()}`);
 }
 
 async function fetchJson<T>(path: string): Promise<T> {

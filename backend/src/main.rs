@@ -69,6 +69,7 @@ fn app(state: AppState) -> Router {
                 .merge(fundamentals::router())
                 .merge(instrument_filter::router())
                 .merge(instrument_search::router())
+                .merge(news::router())
                 .merge(popularity::router())
                 .merge(timeframe::router())
                 .merge(auth::public_router())

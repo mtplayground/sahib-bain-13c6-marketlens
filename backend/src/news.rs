@@ -3,6 +3,12 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    routing::get,
+    Json, Router,
+};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -10,10 +16,14 @@ use sqlx::FromRow;
 use thiserror::Error;
 use url::Url;
 
-use crate::{config::AppConfig, db::Database};
+use crate::{config::AppConfig, db::Database, state::AppState};
 
 const DEFAULT_NEWS_LIMIT: u16 = 25;
 const MAX_NEWS_LIMIT: u16 = 100;
+
+pub fn router() -> Router<AppState> {
+    Router::new().route("/news", get(news_feed))
+}
 
 #[async_trait]
 pub trait NewsProvider: Send + Sync {
@@ -116,6 +126,23 @@ pub struct NewsArticleInstrument {
     pub relevance_score: Option<Decimal>,
     pub matched_symbol: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NewsArticleWithInstruments {
+    #[serde(flatten)]
+    pub article: NewsArticle,
+    pub instruments: Vec<NewsArticleInstrumentSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NewsArticleInstrumentSummary {
+    pub instrument_id: i64,
+    pub canonical_symbol: String,
+    pub display_name: String,
+    pub asset_class: String,
+    pub relevance_score: Option<Decimal>,
+    pub matched_symbol: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -274,6 +301,213 @@ pub async fn persist_articles(
         articles: persisted_articles,
         article_instrument_links,
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct NewsFeedParams {
+    instrument_id: Option<i64>,
+    symbol: Option<String>,
+    provider: Option<String>,
+    source: Option<String>,
+    limit: Option<u16>,
+}
+
+impl NewsFeedParams {
+    fn validate(&self) -> Result<ValidatedNewsFeedQuery, NewsApiError> {
+        if self.instrument_id.is_some_and(|id| id <= 0) {
+            return Err(NewsApiError::InvalidInstrumentId);
+        }
+
+        Ok(ValidatedNewsFeedQuery {
+            instrument_id: self.instrument_id,
+            symbol: normalize_optional(self.symbol.clone().unwrap_or_default())
+                .map(|symbol| symbol.to_ascii_uppercase()),
+            provider: normalize_optional(self.provider.clone().unwrap_or_default()),
+            source: normalize_optional(self.source.clone().unwrap_or_default()),
+            limit: self.limit.unwrap_or(DEFAULT_NEWS_LIMIT).clamp(1, MAX_NEWS_LIMIT),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ValidatedNewsFeedQuery {
+    instrument_id: Option<i64>,
+    symbol: Option<String>,
+    provider: Option<String>,
+    source: Option<String>,
+    limit: u16,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct AppliedNewsFeedQuery {
+    instrument_id: Option<i64>,
+    symbol: Option<String>,
+    provider: Option<String>,
+    source: Option<String>,
+    limit: u16,
+}
+
+impl From<&ValidatedNewsFeedQuery> for AppliedNewsFeedQuery {
+    fn from(query: &ValidatedNewsFeedQuery) -> Self {
+        Self {
+            instrument_id: query.instrument_id,
+            symbol: query.symbol.clone(),
+            provider: query.provider.clone(),
+            source: query.source.clone(),
+            limit: query.limit,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct NewsFeedResponse {
+    query: AppliedNewsFeedQuery,
+    count: usize,
+    results: Vec<NewsArticleWithInstruments>,
+}
+
+async fn news_feed(
+    State(state): State<AppState>,
+    Query(params): Query<NewsFeedParams>,
+) -> Result<Json<NewsFeedResponse>, (StatusCode, Json<NewsErrorResponse>)> {
+    let query = params.validate().map_err(news_error_response)?;
+    let articles = fetch_news_articles(&state, &query)
+        .await
+        .map_err(NewsApiError::Database)
+        .map_err(news_error_response)?;
+    let links = fetch_article_instrument_summaries(
+        &state,
+        &articles.iter().map(|article| article.id).collect::<Vec<_>>(),
+    )
+    .await
+    .map_err(NewsApiError::Database)
+    .map_err(news_error_response)?;
+    let results = articles
+        .into_iter()
+        .map(|article| NewsArticleWithInstruments {
+            instruments: links
+                .iter()
+                .filter(|link| link.article_id == article.id)
+                .map(NewsArticleInstrumentSummary::from)
+                .collect(),
+            article,
+        })
+        .collect::<Vec<_>>();
+
+    Ok(Json(NewsFeedResponse {
+        query: AppliedNewsFeedQuery::from(&query),
+        count: results.len(),
+        results,
+    }))
+}
+
+async fn fetch_news_articles(
+    state: &AppState,
+    query: &ValidatedNewsFeedQuery,
+) -> Result<Vec<NewsArticle>, sqlx::Error> {
+    sqlx::query_as::<_, NewsArticle>(
+        r#"
+        SELECT DISTINCT a.*
+        FROM news_articles a
+        LEFT JOIN news_article_instruments ai ON ai.article_id = a.id
+        LEFT JOIN instruments i ON i.id = ai.instrument_id
+        WHERE ($1::BIGINT IS NULL OR ai.instrument_id = $1)
+            AND ($2::TEXT IS NULL OR lower(i.canonical_symbol) = lower($2))
+            AND ($3::TEXT IS NULL OR a.provider = $3)
+            AND ($4::TEXT IS NULL OR lower(a.source_name) = lower($4))
+        ORDER BY a.published_at DESC, a.id DESC
+        LIMIT $5
+        "#,
+    )
+    .bind(query.instrument_id)
+    .bind(query.symbol.as_deref())
+    .bind(query.provider.as_deref())
+    .bind(query.source.as_deref())
+    .bind(i64::from(query.limit))
+    .fetch_all(state.database().pool())
+    .await
+}
+
+async fn fetch_article_instrument_summaries(
+    state: &AppState,
+    article_ids: &[i64],
+) -> Result<Vec<NewsArticleInstrumentSummaryRow>, sqlx::Error> {
+    if article_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, NewsArticleInstrumentSummaryRow>(
+        r#"
+        SELECT
+            ai.article_id,
+            ai.instrument_id,
+            i.canonical_symbol,
+            i.display_name,
+            i.asset_class,
+            ai.relevance_score,
+            ai.matched_symbol
+        FROM news_article_instruments ai
+        INNER JOIN instruments i ON i.id = ai.instrument_id
+        WHERE ai.article_id = ANY($1)
+        ORDER BY ai.article_id, ai.relevance_score DESC NULLS LAST, i.canonical_symbol ASC
+        "#,
+    )
+    .bind(article_ids.to_vec())
+    .fetch_all(state.database().pool())
+    .await
+}
+
+#[derive(Debug, FromRow)]
+struct NewsArticleInstrumentSummaryRow {
+    article_id: i64,
+    instrument_id: i64,
+    canonical_symbol: String,
+    display_name: String,
+    asset_class: String,
+    relevance_score: Option<Decimal>,
+    matched_symbol: Option<String>,
+}
+
+impl From<&NewsArticleInstrumentSummaryRow> for NewsArticleInstrumentSummary {
+    fn from(row: &NewsArticleInstrumentSummaryRow) -> Self {
+        Self {
+            instrument_id: row.instrument_id,
+            canonical_symbol: row.canonical_symbol.clone(),
+            display_name: row.display_name.clone(),
+            asset_class: row.asset_class.clone(),
+            relevance_score: row.relevance_score,
+            matched_symbol: row.matched_symbol.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct NewsErrorResponse {
+    error: &'static str,
+    message: String,
+}
+
+#[derive(Debug, Error)]
+enum NewsApiError {
+    #[error("instrument id must be positive")]
+    InvalidInstrumentId,
+    #[error("failed to read news articles: {0}")]
+    Database(#[from] sqlx::Error),
+}
+
+fn news_error_response(error: NewsApiError) -> (StatusCode, Json<NewsErrorResponse>) {
+    let (status, code) = match error {
+        NewsApiError::InvalidInstrumentId => (StatusCode::BAD_REQUEST, "invalid_instrument_id"),
+        NewsApiError::Database(_) => (StatusCode::INTERNAL_SERVER_ERROR, "news_database_error"),
+    };
+
+    (
+        status,
+        Json(NewsErrorResponse {
+            error: code,
+            message: error.to_string(),
+        }),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -1842,6 +1842,118 @@
   text-align: right;
 }
 
+.news-panel {
+  display: grid;
+  gap: 1rem;
+}
+
+.news-panel.is-loading {
+  opacity: 0.72;
+}
+
+.news-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+}
+
+.news-card {
+  display: grid;
+  gap: 0.65rem;
+  min-width: 0;
+  padding: 0.85rem;
+  border: 1px solid rgba(77, 238, 234, 0.18);
+  border-radius: var(--ml-radius);
+  background: rgba(7, 13, 8, 0.68);
+}
+
+.news-card__meta,
+.news-card__footer,
+.news-card__symbols {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.news-card__meta,
+.news-card__footer {
+  justify-content: space-between;
+}
+
+.news-card__meta span,
+.news-card__meta time,
+.news-card__footer span,
+.news-card__footer a,
+.news-card__symbols span {
+  min-width: 0;
+  overflow: hidden;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.news-card__meta span {
+  color: var(--ml-cyan);
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.news-card__meta time,
+.news-card__footer span {
+  color: var(--ml-dim);
+  font-size: 0.68rem;
+}
+
+.news-card h3 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--ml-lime);
+  font-size: 1rem;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+}
+
+.news-card p {
+  display: -webkit-box;
+  min-height: 3.6rem;
+  margin: 0;
+  overflow: hidden;
+  color: var(--ml-muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.news-card__symbols span {
+  max-width: 8rem;
+  padding: 0.15rem 0.45rem;
+  color: var(--ml-lime);
+  font-size: 0.66rem;
+  border: 1px solid rgba(156, 255, 0, 0.2);
+  border-radius: 999px;
+  background: rgba(156, 255, 0, 0.08);
+}
+
+.news-card__footer a {
+  display: inline-flex;
+  gap: 0.35rem;
+  align-items: center;
+  color: var(--ml-cyan);
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.news-card__footer a:hover,
+.news-card__footer a:focus-visible {
+  color: var(--ml-lime);
+  outline: none;
+}
+
 .overlay-chart-layout {
   display: grid;
   gap: 1rem;
@@ -2276,6 +2388,7 @@
   .instrument-picker__grid,
   .watchlist-layout,
   .alerts-layout,
+  .news-grid,
   .analytics-panel,
   .fundamentals-summary,
   .fundamentals-data-grid,
