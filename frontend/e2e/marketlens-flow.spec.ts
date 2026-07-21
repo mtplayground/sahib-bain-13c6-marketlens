@@ -6,14 +6,17 @@ const instruments = [
   instrument(101, 'NVDA', 'NVIDIA Corporation', 'equity', 'US', 'NASDAQ', 'USD', '177.25'),
   instrument(102, 'SPY', 'SPDR S&P 500 ETF Trust', 'equity', 'US', 'NYSEARCA', 'USD', '646.12'),
   instrument(103, 'QQQ', 'Invesco QQQ Trust', 'equity', 'US', 'NASDAQ', 'USD', '572.44'),
-  instrument(104, 'BTC/USD', 'Bitcoin spot composite', 'equity', 'Global', 'Crypto', 'USD', '118420.50')
+  instrument(104, 'BTC/USD', 'Bitcoin spot composite', 'crypto', 'Global', 'Crypto', 'USD', '118420.50')
 ];
 
-test('search, compare overlays, toggle indicators, and inspect estimator evidence', async ({ page }) => {
-  await installApiMocks(page);
+test('search, compare overlays, live ticks, and inspect estimator evidence', async ({ page }) => {
+  await installRealtimeSocketMock(page);
+  const api = await installApiMocks(page);
 
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Test Analyst' })).toBeVisible();
+  await expect(page.getByText('finnhub live feed').first()).toBeVisible();
+  await expect(page.getByText('Receiving live market data').first()).toBeVisible();
 
   await page.getByLabel('Search').fill('NV');
   const candidatesPanel = page.getByLabel('Chart candidates');
@@ -35,6 +38,7 @@ test('search, compare overlays, toggle indicators, and inspect estimator evidenc
   await expect(chartPanel.getByRole('button', { name: 'Candles' })).toHaveAttribute('aria-pressed', 'true');
   await chartPanel.getByRole('button', { name: 'Line' }).click();
   await expect(chartPanel.getByRole('button', { name: 'Line' })).toHaveAttribute('aria-pressed', 'true');
+  expect(api.timeframeSymbols).toEqual(expect.arrayContaining(['SPY', 'BTC/USD', 'NVDA']));
 
   await chartPanel.getByRole('button', { name: 'EMA 12' }).click();
   await chartPanel.getByRole('button', { name: 'RSI 14' }).click();
@@ -42,6 +46,12 @@ test('search, compare overlays, toggle indicators, and inspect estimator evidenc
   await expect(chartPanel.getByRole('button', { name: 'EMA 12' })).toHaveAttribute('aria-pressed', 'true');
   await expect(chartPanel.getByRole('button', { name: 'RSI 14' })).toHaveAttribute('aria-pressed', 'true');
   await expect(chartPanel.getByRole('button', { name: 'Volume' })).toHaveAttribute('aria-pressed', 'true');
+
+  const realtimePanel = panelByHeading(page, 'Realtime Subscriptions');
+  await expect(realtimePanel.getByText('SPY').first()).toBeVisible();
+  await expect(realtimePanel.getByText('BTC/USD').first()).toBeVisible();
+  await expect(realtimePanel.getByText(/USD\s+65[0-9]/).first()).toBeVisible();
+  await expect(realtimePanel.getByText(/market\.tick price/).first()).toBeVisible();
 
   const reportPanel = panelByHeading(page, 'Estimator Report');
   await reportPanel.getByRole('button', { name: /Generate report/ }).click();
@@ -59,13 +69,39 @@ test('search, compare overlays, toggle indicators, and inspect estimator evidenc
   await expect(reportPanel.getByRole('region', { name: 'Linked news evidence' })).toContainText('NVDA supply chain demand');
 });
 
-async function installApiMocks(page: Page) {
+test('degraded live feed state starts cleanly without provider key', async ({ page }) => {
+  await installApiMocks(page, { providerConfigured: false, emptyCatalog: true });
+
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Test Analyst' })).toBeVisible();
+  await expect(page.getByText('finnhub feed not configured').first()).toBeVisible();
+  await expect(page.getByText('No live market provider is configured').first()).toBeVisible();
+  await expect(page.getByLabel('Chart candidates')).toContainText('No catalog rows match because no live market provider is configured.');
+  await expect(panelByHeading(page, 'Realtime Subscriptions')).toContainText('No live market provider is configured');
+});
+
+async function installApiMocks(page: Page, options: { providerConfigured?: boolean; emptyCatalog?: boolean } = {}) {
   let generated = false;
+  const providerConfigured = options.providerConfigured ?? true;
+  const timeframeSymbols: string[] = [];
 
   await page.route('**/api/v1/**', async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
+
+    if (path === '/api/v1/config/status') {
+      return json(route, {
+        market_data_provider_key_configured: providerConfigured,
+        market_data_provider_name: 'finnhub',
+        market_data_provider_base_url_configured: false,
+        live_market_ingestion_enabled: providerConfigured,
+        live_market_symbols: ['SPY', 'BTC/USD', 'NVDA', 'ETH/USD', 'VIX'],
+        live_market_poll_interval_seconds: 5,
+        live_market_provider_name: 'finnhub',
+        live_market_provider_base_url_configured: false
+      });
+    }
 
     if (path === '/api/v1/auth/session') {
       return json(route, {
@@ -87,6 +123,7 @@ async function installApiMocks(page: Page) {
     }
 
     if (path === '/api/v1/instruments/filter' || path === '/api/v1/instruments/search') {
+      const results = options.emptyCatalog ? [] : instruments;
       return json(route, {
         query: url.searchParams.get('q') ?? '',
         filters: {
@@ -96,8 +133,8 @@ async function installApiMocks(page: Page) {
           max_price: url.searchParams.get('max_price'),
           limit: Number(url.searchParams.get('limit') ?? 25)
         },
-        count: instruments.length,
-        results: instruments
+        count: results.length,
+        results
       });
     }
 
@@ -152,6 +189,7 @@ async function installApiMocks(page: Page) {
 
     if (path === '/api/v1/series/timeframe') {
       const symbol = url.searchParams.get('symbol') ?? 'NVDA';
+      timeframeSymbols.push(symbol);
       return json(route, timeframeSeries(symbol));
     }
 
@@ -172,6 +210,103 @@ async function installApiMocks(page: Page) {
     }
 
     return json(route, { error: 'not_found', message: `Unhandled mock route: ${request.method()} ${path}` }, 404);
+  });
+
+  return { timeframeSymbols };
+}
+
+
+async function installRealtimeSocketMock(page: Page) {
+  await page.addInitScript(() => {
+    const prices: Record<string, number> = {
+      SPY: 651.42,
+      'BTC/USD': 118840.25,
+      NVDA: 181.73,
+      QQQ: 575.61,
+      'ETH/USD': 3812.44,
+      VIX: 16.28
+    };
+
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+      readyState = MockWebSocket.CONNECTING;
+      private listeners = new Map<string, Array<(event: { data?: string }) => void>>();
+
+      constructor(public url: string) {
+        setTimeout(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.emit('open', {});
+          this.emit('message', { data: JSON.stringify({ type: 'connection.ready', connection_id: 'mock-ws' }) });
+        }, 5);
+      }
+
+      addEventListener(type: string, listener: (event: { data?: string }) => void) {
+        this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+      }
+
+      close() {
+        this.readyState = MockWebSocket.CLOSED;
+        this.emit('close', {});
+      }
+
+      send(raw: string) {
+        const message = JSON.parse(raw);
+        if (message.type !== 'subscribe') {
+          return;
+        }
+        this.emit('message', {
+          data: JSON.stringify({
+            type: 'subscription.ack',
+            subscription_id: message.subscription_id,
+            redis_channel: message.channel === 'alert_events' ? 'marketlens:alerts:events' : `marketlens:market:ticks:${message.instrument_symbol}`
+          })
+        });
+        if (message.channel !== 'market_ticks') {
+          return;
+        }
+        const symbol = String(message.instrument_symbol);
+        const price = prices[symbol] ?? 100;
+        setTimeout(() => {
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'subscription.event',
+              subscription_ids: [message.subscription_id],
+              redis_channel: `marketlens:market:ticks:${symbol.toLowerCase().replace(/[^a-z0-9._-]+/g, '-')}`,
+              payload: {
+                type: 'market.tick',
+                provider: 'finnhub',
+                provider_instrument_id: symbol.includes('/') ? `BINANCE:${symbol.replace('/', '')}T` : symbol,
+                series_id: 700 + symbol.length,
+                symbol,
+                asset_class: symbol.includes('/') ? 'crypto' : 'equity',
+                price,
+                currency: 'USD',
+                as_of: '2026-07-21T14:31:00.000Z',
+                bid: price - 0.05,
+                ask: price + 0.05
+              }
+            })
+          });
+        }, 20);
+      }
+
+      private emit(type: string, event: { data?: string }) {
+        for (const listener of this.listeners.get(type) ?? []) {
+          listener(event);
+        }
+      }
+    }
+
+    Object.assign(MockWebSocket, {
+      CONNECTING: 0,
+      OPEN: 1,
+      CLOSING: 2,
+      CLOSED: 3
+    });
+    window.WebSocket = MockWebSocket as unknown as typeof WebSocket;
   });
 }
 
