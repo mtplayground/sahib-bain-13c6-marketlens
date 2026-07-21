@@ -5,6 +5,7 @@ mod auth;
 mod config;
 mod db;
 mod email;
+mod estimator;
 mod fundamentals;
 mod ingestion;
 mod instrument_filter;
@@ -66,6 +67,7 @@ fn app(state: AppState) -> Router {
         .nest(
             "/api/v1",
             routes::api_router()
+                .merge(estimator::router())
                 .merge(fundamentals::router())
                 .merge(instrument_filter::router())
                 .merge(instrument_search::router())
