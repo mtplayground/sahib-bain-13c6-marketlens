@@ -18,13 +18,30 @@ Required backend settings:
 - `REDIS_URL`, which must be `redis://` or `rediss://`.
 - `JWT_SECRET`, kept for legacy compatibility; new auth uses `mctai_session`.
 - `MCTAI_AUTH_URL`, `MCTAI_AUTH_APP_TOKEN`, and `MCTAI_AUTH_JWKS_URL`.
-- `MARKET_DATA_PROVIDER_KEY` and `NEWS_PROVIDER_KEY`.
+- `NEWS_PROVIDER_KEY`.
+- `MARKET_DATA_PROVIDER_KEY` when `LIVE_MARKET_INGESTION_ENABLED=true`.
 
 Optional URL settings are validated when present: `SELF_URL`,
 `ALLOWED_CORS_ORIGIN`, `MARKET_DATA_PROVIDER_BASE_URL`,
-`NEWS_PROVIDER_BASE_URL`, and `MCTAI_EMAIL_URL`. Configure
-`MCTAI_EMAIL_URL` and `MCTAI_EMAIL_APP_TOKEN` together, or omit both to skip
-email delivery in a bare local run.
+`LIVE_MARKET_PROVIDER_BASE_URL`, `NEWS_PROVIDER_BASE_URL`, and
+`MCTAI_EMAIL_URL`. Configure `MCTAI_EMAIL_URL` and
+`MCTAI_EMAIL_APP_TOKEN` together, or omit both to skip email delivery in a bare
+local run.
+
+Live market ingestion configuration:
+
+- `LIVE_MARKET_INGESTION_ENABLED` toggles the live feed worker configuration.
+  It defaults to `false`; when set to `true`, `MARKET_DATA_PROVIDER_KEY` must be
+  configured so startup fails clearly instead of silently running without data.
+- `LIVE_MARKET_SYMBOLS` is a comma-separated symbol list. It defaults to
+  `SPY,BTC/USD,NVDA,ETH/USD,VIX`, matching the frontend realtime defaults.
+- `LIVE_MARKET_POLL_INTERVAL_SECONDS` defaults to `5` and must be greater than
+  zero; increase it to respect provider rate limits.
+- `LIVE_MARKET_PROVIDER_NAME` defaults to the market-data provider name, which
+  defaults to `finnhub`.
+- `LIVE_MARKET_PROVIDER_BASE_URL` defaults to `MARKET_DATA_PROVIDER_BASE_URL`
+  when present; otherwise the Finnhub adapter uses its built-in default base
+  URL.
 
 ### Backend
 
