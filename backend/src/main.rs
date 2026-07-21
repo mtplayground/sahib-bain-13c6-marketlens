@@ -7,6 +7,7 @@ mod instrument_filter;
 mod instrument_search;
 mod instruments;
 mod market_data;
+mod popularity;
 mod redis;
 mod routes;
 mod series;
@@ -57,6 +58,7 @@ fn app(state: AppState) -> Router {
             routes::api_router()
                 .merge(instrument_filter::router())
                 .merge(instrument_search::router())
+                .merge(popularity::router())
                 .merge(auth::public_router())
                 .merge(protected_auth),
         )
