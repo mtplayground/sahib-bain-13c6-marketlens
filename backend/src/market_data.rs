@@ -3,7 +3,8 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
+use rust_decimal::Decimal;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -26,6 +27,11 @@ pub trait MarketDataProvider: Send + Sync {
         &self,
         request: LatestQuoteRequest,
     ) -> Result<Vec<MarketQuote>, MarketDataError>;
+
+    async fn fundamentals(
+        &self,
+        request: FundamentalsRequest,
+    ) -> Result<ProviderFundamentalsSnapshot, MarketDataError>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -148,6 +154,90 @@ pub struct MarketQuote {
     pub duration: Option<f64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FundamentalsRequest {
+    pub instrument: ProviderInstrumentRef,
+}
+
+impl FundamentalsRequest {
+    pub fn new(instrument: ProviderInstrumentRef) -> Result<Self, MarketDataError> {
+        if instrument.provider_id.trim().is_empty() {
+            return Err(MarketDataError::EmptyProviderInstrumentId);
+        }
+
+        Ok(Self { instrument })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProviderFundamentalsSnapshot {
+    pub instrument: ProviderInstrumentRef,
+    pub company_financials: Vec<ProviderCompanyFinancial>,
+    pub bond_yield_curve_points: Vec<ProviderBondYieldCurvePoint>,
+    pub credit_ratings: Vec<ProviderCreditRating>,
+    pub key_ratios: Vec<ProviderKeyRatios>,
+    pub source_updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProviderCompanyFinancial {
+    pub fiscal_period_end: NaiveDate,
+    pub fiscal_period_type: String,
+    pub currency: Option<String>,
+    pub revenue: Option<Decimal>,
+    pub gross_profit: Option<Decimal>,
+    pub operating_income: Option<Decimal>,
+    pub net_income: Option<Decimal>,
+    pub ebitda: Option<Decimal>,
+    pub eps_diluted: Option<Decimal>,
+    pub total_assets: Option<Decimal>,
+    pub total_liabilities: Option<Decimal>,
+    pub shareholder_equity: Option<Decimal>,
+    pub operating_cash_flow: Option<Decimal>,
+    pub free_cash_flow: Option<Decimal>,
+    pub source_updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProviderBondYieldCurvePoint {
+    pub curve_name: String,
+    pub region: Option<String>,
+    pub currency: Option<String>,
+    pub tenor_months: i32,
+    pub yield_percent: Decimal,
+    pub observed_at: DateTime<Utc>,
+    pub source_updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderCreditRating {
+    pub agency: String,
+    pub rating_type: String,
+    pub rating: String,
+    pub outlook: Option<String>,
+    pub watch_status: Option<String>,
+    pub effective_at: Option<DateTime<Utc>>,
+    pub source_updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProviderKeyRatios {
+    pub as_of_date: NaiveDate,
+    pub pe_ratio: Option<Decimal>,
+    pub pb_ratio: Option<Decimal>,
+    pub ps_ratio: Option<Decimal>,
+    pub dividend_yield: Option<Decimal>,
+    pub return_on_equity: Option<Decimal>,
+    pub return_on_assets: Option<Decimal>,
+    pub debt_to_equity: Option<Decimal>,
+    pub current_ratio: Option<Decimal>,
+    pub quick_ratio: Option<Decimal>,
+    pub gross_margin: Option<Decimal>,
+    pub operating_margin: Option<Decimal>,
+    pub net_margin: Option<Decimal>,
+    pub source_updated_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct HttpMarketDataProvider {
     name: String,
@@ -252,6 +342,13 @@ impl MarketDataProvider for HttpMarketDataProvider {
     ) -> Result<Vec<MarketQuote>, MarketDataError> {
         self.post_json("/v1/quotes/latest", &request).await
     }
+
+    async fn fundamentals(
+        &self,
+        request: FundamentalsRequest,
+    ) -> Result<ProviderFundamentalsSnapshot, MarketDataError> {
+        self.post_json("/v1/fundamentals/snapshot", &request).await
+    }
 }
 
 #[derive(Debug, Error)]
@@ -270,6 +367,8 @@ pub enum MarketDataError {
     Provider { status: StatusCode, body: String },
     #[error("latest quote request must include at least one instrument")]
     EmptyInstrumentList,
+    #[error("provider instrument id cannot be empty")]
+    EmptyProviderInstrumentId,
 }
 
 fn normalize_required(
@@ -287,8 +386,8 @@ fn normalize_required(
 #[cfg(test)]
 mod tests {
     use super::{
-        AssetClass, HttpMarketDataProvider, InstrumentSearchRequest, LatestQuoteRequest,
-        MarketDataError, ProviderCapabilities, ProviderInstrumentRef,
+        AssetClass, FundamentalsRequest, HttpMarketDataProvider, InstrumentSearchRequest,
+        LatestQuoteRequest, MarketDataError, ProviderCapabilities, ProviderInstrumentRef,
     };
 
     #[test]
@@ -334,6 +433,20 @@ mod tests {
         ]);
 
         assert!(request.is_ok());
+    }
+
+    #[test]
+    fn rejects_empty_fundamentals_instrument_id() {
+        let result = FundamentalsRequest::new(ProviderInstrumentRef {
+            provider_id: " ".to_owned(),
+            symbol: Some("SPY".to_owned()),
+            asset_class: AssetClass::Equity,
+        });
+
+        assert!(matches!(
+            result,
+            Err(MarketDataError::EmptyProviderInstrumentId)
+        ));
     }
 
     #[test]
