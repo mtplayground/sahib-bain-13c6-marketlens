@@ -340,6 +340,126 @@ export type NewsFeedResponse = {
   results: NewsArticle[];
 };
 
+export type EstimatorDirection = 'bullish' | 'bearish' | 'neutral';
+
+export type EstimatorReportReason = {
+  rank: number;
+  category: string;
+  label: string;
+  contribution: number;
+  weight: number;
+};
+
+export type EstimatorMarketTrendEvidence = {
+  name: string;
+  value: number;
+  unit: string;
+  observed_at: string | null;
+};
+
+export type EstimatorNewsEvidence = {
+  id: number;
+  title: string;
+  source_name: string;
+  source_url: string;
+  published_at: string;
+  sentiment_score: number;
+};
+
+export type EstimatorGeneratedReport = {
+  query: {
+    instrument_id: number | null;
+    symbol: string | null;
+    comparison_symbols: string[];
+    interval: string;
+    limit: number;
+  };
+  model: {
+    name: string;
+    version: string;
+    disclaimer: string;
+  };
+  instrument: {
+    id: number;
+    canonical_symbol: string;
+    display_name: string;
+    asset_class: string;
+  };
+  direction: EstimatorDirection;
+  certainty_percentage: number;
+  composite_score: number;
+  reasons: EstimatorReportReason[];
+  evidence: {
+    market_trends: EstimatorMarketTrendEvidence[];
+    news_articles: EstimatorNewsEvidence[];
+  };
+};
+
+export type EstimatorReportNewsLink = {
+  news_article_id: number;
+  sentiment_score: number | null;
+  rank: number;
+  title: string;
+  source_name: string;
+  source_url: string;
+  published_at: string;
+};
+
+export type EstimatorReportTrendLink = {
+  trend_name: string;
+  trend_value: number;
+  unit: string;
+  observed_at: string | null;
+  rank: number;
+};
+
+export type EstimatorReportRecord = {
+  id: number;
+  instrument_id: number;
+  symbol: string;
+  direction: EstimatorDirection;
+  certainty_percentage: number;
+  composite_score: number;
+  model_name: string;
+  model_version: string;
+  query: EstimatorGeneratedReport['query'];
+  reasons: EstimatorReportReason[];
+  report: EstimatorGeneratedReport;
+  evidence_links: {
+    news_articles: EstimatorReportNewsLink[];
+    market_trends: EstimatorReportTrendLink[];
+  };
+  generated_at: string;
+};
+
+export type EstimatorReportSummary = Omit<
+  EstimatorReportRecord,
+  'query' | 'reasons' | 'report' | 'evidence_links'
+>;
+
+export type EstimatorReportResponse = {
+  report: EstimatorReportRecord;
+};
+
+export type EstimatorReportHistoryResponse = {
+  count: number;
+  reports: EstimatorReportSummary[];
+};
+
+export type EstimatorReportRequest = {
+  instrumentId?: number;
+  symbol?: string;
+  comparisonSymbols?: string[];
+  interval?: string;
+  limit?: number;
+};
+
+export type EstimatorReportHistoryQuery = {
+  instrumentId?: number | null;
+  symbol?: string | null;
+  limit?: number;
+};
+
 export type NewsFeedQuery = {
   instrumentId?: number | null;
   symbol?: string | null;
@@ -526,6 +646,39 @@ export async function loadNewsFeed(query: NewsFeedQuery = {}): Promise<NewsFeedR
   params.set('limit', String(query.limit ?? 8));
 
   return fetchJson<NewsFeedResponse>(`/api/v1/news?${params.toString()}`);
+}
+
+export async function generateEstimatorReport(
+  request: EstimatorReportRequest
+): Promise<EstimatorReportResponse> {
+  return writeJson<EstimatorReportResponse>('/api/v1/estimator/reports', 'POST', {
+    ...(request.instrumentId === undefined ? {} : { instrument_id: request.instrumentId }),
+    ...(request.symbol === undefined ? {} : { symbol: request.symbol }),
+    ...(request.comparisonSymbols === undefined
+      ? {}
+      : { comparison_symbols: request.comparisonSymbols }),
+    ...(request.interval === undefined ? {} : { interval: request.interval }),
+    ...(request.limit === undefined ? {} : { limit: request.limit })
+  });
+}
+
+export async function loadEstimatorReportHistory(
+  query: EstimatorReportHistoryQuery = {}
+): Promise<EstimatorReportHistoryResponse> {
+  const params = new URLSearchParams();
+  if (query.instrumentId) {
+    params.set('instrument_id', String(query.instrumentId));
+  }
+  appendIfPresent(params, 'symbol', query.symbol ?? '');
+  params.set('limit', String(query.limit ?? 6));
+
+  return fetchJson<EstimatorReportHistoryResponse>(
+    `/api/v1/estimator/reports?${params.toString()}`
+  );
+}
+
+export async function loadEstimatorReport(reportId: number): Promise<EstimatorReportResponse> {
+  return fetchJson<EstimatorReportResponse>(`/api/v1/estimator/reports/${reportId}`);
 }
 
 async function fetchJson<T>(path: string): Promise<T> {
