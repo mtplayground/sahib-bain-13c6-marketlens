@@ -8,7 +8,7 @@ export type LatestPrice = {
   currency: string | null;
 };
 
-export type InstrumentCandidate = {
+export type InstrumentSummary = {
   id: number;
   canonical_symbol: string;
   display_name: string;
@@ -22,6 +22,9 @@ export type InstrumentCandidate = {
   maturity_date: string | null;
   status: string;
   updated_at: string;
+};
+
+export type InstrumentCandidate = InstrumentSummary & {
   latest_price?: LatestPrice | null;
 };
 
@@ -41,6 +44,42 @@ type InstrumentFilterResponse = {
   };
   count: number;
   results: InstrumentCandidate[];
+};
+
+export type ViewHistoryEntry = {
+  instrument_id: number;
+  view_count: number;
+  first_viewed_at: string;
+  last_viewed_at: string;
+  instrument: InstrumentSummary;
+};
+
+export type MostViewedResponse = {
+  count: number;
+  results: ViewHistoryEntry[];
+};
+
+export type RecordViewResponse = {
+  status: 'recorded';
+  entry: ViewHistoryEntry;
+};
+
+export type PopularInstrumentEntry = {
+  instrument_id: number;
+  platform_rank: number;
+  popularity_score: number;
+  total_views: number;
+  unique_viewers: number;
+  recent_views: number;
+  last_viewed_at: string | null;
+  refreshed_at: string;
+  instrument: InstrumentSummary;
+};
+
+export type PopularInstrumentsResponse = {
+  count: number;
+  refreshed_at: string | null;
+  results: PopularInstrumentEntry[];
 };
 
 export type InstrumentDiscoveryFilters = {
@@ -75,6 +114,38 @@ export async function filterInstruments(
   appendIfPresent(params, 'max_price', filters.maxPrice);
 
   return fetchJson<InstrumentFilterResponse>(`/api/v1/instruments/filter?${params.toString()}`);
+}
+
+export async function recordInstrumentView(instrumentId: number): Promise<RecordViewResponse> {
+  const response = await fetch(apiPath('/api/v1/view-history'), {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ instrument_id: instrumentId })
+  });
+
+  if (!response.ok) {
+    throw await parseProblem(response);
+  }
+
+  return (await response.json()) as RecordViewResponse;
+}
+
+export async function loadMostViewed(limit = 5): Promise<MostViewedResponse> {
+  const params = new URLSearchParams();
+  params.set('limit', String(limit));
+
+  return fetchJson<MostViewedResponse>(`/api/v1/view-history/most-viewed?${params.toString()}`);
+}
+
+export async function loadMostPopular(limit = 5): Promise<PopularInstrumentsResponse> {
+  const params = new URLSearchParams();
+  params.set('limit', String(limit));
+
+  return fetchJson<PopularInstrumentsResponse>(`/api/v1/instruments/popular?${params.toString()}`);
 }
 
 async function fetchJson<T>(path: string): Promise<T> {

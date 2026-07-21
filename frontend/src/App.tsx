@@ -3,6 +3,8 @@ import {
   BarChart3,
   CheckCircle2,
   CircleAlert,
+  Eye,
+  Flame,
   KeyRound,
   ListFilter,
   LogIn,
@@ -23,10 +25,15 @@ import { AppShell } from './components/AppShell';
 import { Panel } from './components/Panel';
 import {
   filterInstruments,
+  loadMostPopular,
+  loadMostViewed,
+  recordInstrumentView,
   searchInstruments,
   type AssetType,
   type InstrumentCandidate,
-  type InstrumentDiscoveryFilters
+  type InstrumentDiscoveryFilters,
+  type PopularInstrumentEntry,
+  type ViewHistoryEntry
 } from './instruments';
 import {
   useRealtimeMarketData,
@@ -333,6 +340,7 @@ function AuthenticatedDashboard({
 }) {
   const [chartCandidates, setChartCandidates] = useState<InstrumentCandidate[]>([]);
   const [activeInstrument, setActiveInstrument] = useState<InstrumentCandidate | null>(null);
+  const [viewHistoryRevision, setViewHistoryRevision] = useState(0);
   const candidateSymbols = useMemo(
     () => chartCandidates.map((candidate) => candidate.canonical_symbol),
     [chartCandidates]
@@ -340,8 +348,16 @@ function AuthenticatedDashboard({
   const handleCandidatesChange = useCallback((candidates: InstrumentCandidate[]) => {
     setChartCandidates(candidates);
   }, []);
-  const handleActiveInstrumentChange = useCallback((instrument: InstrumentCandidate | null) => {
+  const handlePreviewInstrument = useCallback((instrument: InstrumentCandidate | null) => {
     setActiveInstrument(instrument);
+  }, []);
+  const handleOpenInstrument = useCallback((instrument: InstrumentCandidate) => {
+    setActiveInstrument(instrument);
+    void recordInstrumentView(instrument.id)
+      .then(() => setViewHistoryRevision((revision) => revision + 1))
+      .catch((error) => {
+        console.warn('Unable to record instrument view', error);
+      });
   }, []);
 
   return (
@@ -378,8 +394,16 @@ function AuthenticatedDashboard({
         candidates={chartCandidates}
         activeInstrument={activeInstrument}
         onCandidatesChange={handleCandidatesChange}
-        onActiveInstrumentChange={handleActiveInstrumentChange}
+        onPreviewInstrument={handlePreviewInstrument}
+        onOpenInstrument={handleOpenInstrument}
       />
+
+      <MostViewedPanel
+        revision={viewHistoryRevision}
+        onSelectInstrument={handleOpenInstrument}
+      />
+
+      <MostPopularPanel onSelectInstrument={handleOpenInstrument} />
 
       <RealtimeConsole candidateSymbols={candidateSymbols} />
     </section>
@@ -395,12 +419,14 @@ function MarketDiscovery({
   candidates,
   activeInstrument,
   onCandidatesChange,
-  onActiveInstrumentChange
+  onPreviewInstrument,
+  onOpenInstrument
 }: {
   candidates: InstrumentCandidate[];
   activeInstrument: InstrumentCandidate | null;
   onCandidatesChange: (candidates: InstrumentCandidate[]) => void;
-  onActiveInstrumentChange: (instrument: InstrumentCandidate | null) => void;
+  onPreviewInstrument: (instrument: InstrumentCandidate | null) => void;
+  onOpenInstrument: (instrument: InstrumentCandidate) => void;
 }) {
   const [filters, setFilters] = useState<InstrumentDiscoveryFilters>(defaultDiscoveryFilters);
   const [requestState, setRequestState] = useState<DiscoveryRequestState>({
@@ -424,7 +450,7 @@ function MarketDiscovery({
             return;
           }
           onCandidatesChange(response.results);
-          onActiveInstrumentChange(response.results[0] ?? null);
+          onPreviewInstrument(response.results[0] ?? null);
           setRequestState({
             status: 'ready',
             message: `${response.count} candidates`
@@ -435,7 +461,7 @@ function MarketDiscovery({
             return;
           }
           onCandidatesChange([]);
-          onActiveInstrumentChange(null);
+          onPreviewInstrument(null);
           setRequestState({
             status: 'error',
             message: error instanceof Error ? error.message : 'Instrument discovery failed'
@@ -447,7 +473,7 @@ function MarketDiscovery({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [filters, onActiveInstrumentChange, onCandidatesChange, query]);
+  }, [filters, onCandidatesChange, onPreviewInstrument, query]);
 
   function updateFilter<Key extends keyof InstrumentDiscoveryFilters>(
     key: Key,
@@ -543,7 +569,7 @@ function MarketDiscovery({
           <CandidateRows
             candidates={candidates}
             activeInstrument={activeInstrument}
-            onSelect={onActiveInstrumentChange}
+            onSelect={onOpenInstrument}
           />
         </div>
 
@@ -661,6 +687,208 @@ function EmptyInstrumentPanel() {
     <div className="candidate-empty candidate-empty--tall">
       <Target size={24} />
       <span>No active instrument selected.</span>
+    </div>
+  );
+}
+
+type UsagePanelState<T> =
+  | { status: 'loading'; entries: T[]; message: string }
+  | { status: 'ready'; entries: T[]; message: string }
+  | { status: 'error'; entries: T[]; message: string };
+
+function MostViewedPanel({
+  revision,
+  onSelectInstrument
+}: {
+  revision: number;
+  onSelectInstrument: (instrument: InstrumentCandidate) => void;
+}) {
+  const [state, setState] = useState<UsagePanelState<ViewHistoryEntry>>({
+    status: 'loading',
+    entries: [],
+    message: 'Loading personal history'
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    setState((current) => ({
+      status: 'loading',
+      entries: current.entries,
+      message: 'Loading personal history'
+    }));
+
+    loadMostViewed(5)
+      .then((response) => {
+        if (cancelled) {
+          return;
+        }
+        setState({
+          status: 'ready',
+          entries: response.results,
+          message: `${response.count} tracked instruments`
+        });
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setState({
+          status: 'error',
+          entries: [],
+          message: error instanceof Error ? error.message : 'Most Viewed is unavailable'
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [revision]);
+
+  return (
+    <Panel
+      title="Most Viewed"
+      eyebrow="PERSONAL"
+      actions={<UsageStatusPill status={state.status} message={state.message} />}
+    >
+      <UsageList
+        entries={state.entries}
+        emptyMessage="Open instruments from search to build your personal ranking."
+        renderMetric={(entry) => `${entry.view_count} ${entry.view_count === 1 ? 'view' : 'views'}`}
+        renderDetail={(entry) => `Last opened ${formatTimestamp(entry.last_viewed_at)}`}
+        renderRank={(_, index) => `#${index + 1}`}
+        onSelectInstrument={onSelectInstrument}
+      />
+    </Panel>
+  );
+}
+
+function MostPopularPanel({
+  onSelectInstrument
+}: {
+  onSelectInstrument: (instrument: InstrumentCandidate) => void;
+}) {
+  const [state, setState] = useState<UsagePanelState<PopularInstrumentEntry>>({
+    status: 'loading',
+    entries: [],
+    message: 'Loading platform activity'
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    setState((current) => ({
+      status: 'loading',
+      entries: current.entries,
+      message: 'Loading platform activity'
+    }));
+
+    loadMostPopular(5)
+      .then((response) => {
+        if (cancelled) {
+          return;
+        }
+        setState({
+          status: 'ready',
+          entries: response.results,
+          message: response.refreshed_at
+            ? `Updated ${formatTimestamp(response.refreshed_at)}`
+            : `${response.count} popular instruments`
+        });
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setState({
+          status: 'error',
+          entries: [],
+          message: error instanceof Error ? error.message : 'Most Popular is unavailable'
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <Panel
+      title="Most Popular"
+      eyebrow="PLATFORM"
+      actions={<UsageStatusPill status={state.status} message={state.message} />}
+    >
+      <UsageList
+        entries={state.entries}
+        emptyMessage="Platform activity has not produced a popular ranking yet."
+        renderMetric={(entry) => `${entry.total_views} total views`}
+        renderDetail={(entry) => `${entry.unique_viewers} viewers / ${entry.recent_views} recent`}
+        renderRank={(entry) => `#${entry.platform_rank}`}
+        onSelectInstrument={onSelectInstrument}
+      />
+    </Panel>
+  );
+}
+
+function UsageStatusPill({
+  status,
+  message
+}: {
+  status: UsagePanelState<unknown>['status'];
+  message: string;
+}) {
+  const tone = status === 'error' ? 'error' : status === 'loading' ? 'fallback' : 'open';
+
+  return (
+    <span className={`auth-pill auth-pill--${tone}`}>
+      {status === 'loading' ? <RefreshCw size={14} /> : <Eye size={14} />}
+      {message}
+    </span>
+  );
+}
+
+function UsageList<T extends { instrument: InstrumentCandidate }>({
+  entries,
+  emptyMessage,
+  renderMetric,
+  renderDetail,
+  renderRank,
+  onSelectInstrument
+}: {
+  entries: T[];
+  emptyMessage: string;
+  renderMetric: (entry: T) => string;
+  renderDetail: (entry: T) => string;
+  renderRank: (entry: T, index: number) => string;
+  onSelectInstrument: (instrument: InstrumentCandidate) => void;
+}) {
+  if (entries.length === 0) {
+    return (
+      <div className="usage-empty">
+        <Flame size={20} />
+        <span>{emptyMessage}</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="usage-list">
+      {entries.map((entry, index) => (
+        <button
+          className="usage-row"
+          key={`${entry.instrument.id}-${index}`}
+          type="button"
+          onClick={() => onSelectInstrument(entry.instrument)}
+        >
+          <span className="usage-row__rank">{renderRank(entry, index)}</span>
+          <span className="usage-row__instrument">
+            <strong>{entry.instrument.canonical_symbol}</strong>
+            <small>{entry.instrument.display_name}</small>
+          </span>
+          <span className="usage-row__meta">
+            <strong>{renderMetric(entry)}</strong>
+            <small>{renderDetail(entry)}</small>
+          </span>
+        </button>
+      ))}
     </div>
   );
 }
