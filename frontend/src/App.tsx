@@ -6,12 +6,14 @@ import {
   CheckCircle2,
   CircleAlert,
   Eye,
+  ExternalLink,
   Flame,
   KeyRound,
   Landmark,
   ListFilter,
   LogIn,
   MailCheck,
+  Newspaper,
   Percent,
   Plus,
   RadioTower,
@@ -42,6 +44,7 @@ import {
   loadFundamentals,
   loadMostPopular,
   loadMostViewed,
+  loadNewsFeed,
   loadTimeframeSeries,
   loadWatchlists,
   recordInstrumentView,
@@ -62,6 +65,8 @@ import {
   type InstrumentDiscoveryFilters,
   type InstrumentSummary,
   type KeyRatios,
+  type NewsArticle,
+  type NewsFeedResponse,
   type PopularInstrumentEntry,
   type ViewHistoryEntry,
   type Watchlist
@@ -480,6 +485,8 @@ function AuthenticatedDashboard({
       <MostPopularPanel onSelectInstrument={handleOpenInstrument} />
 
       <FundamentalsPanel instrument={activeInstrument} />
+
+      <NewsPanel instrument={activeInstrument} selectedSymbols={selectedSymbols} />
 
       <RealtimeConsole
         candidateSymbols={candidateSymbols}
@@ -2094,6 +2101,154 @@ type FundamentalsPanelState =
   | { status: 'loading'; data: FundamentalsResponse | null; message: string }
   | { status: 'ready'; data: FundamentalsResponse; message: string }
   | { status: 'error'; data: null; message: string };
+
+type NewsPanelState =
+  | { status: 'loading'; data: NewsFeedResponse | null; message: string }
+  | { status: 'ready'; data: NewsFeedResponse; message: string }
+  | { status: 'error'; data: null; message: string };
+
+function NewsPanel({
+  instrument,
+  selectedSymbols
+}: {
+  instrument: InstrumentCandidate | null;
+  selectedSymbols: string[];
+}) {
+  const fallbackSymbol = selectedSymbols[0] ?? null;
+  const [state, setState] = useState<NewsPanelState>({
+    status: 'loading',
+    data: null,
+    message: 'Loading news'
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    const query = instrument
+      ? { instrumentId: instrument.id, limit: 8 }
+      : { symbol: fallbackSymbol, limit: 8 };
+    setState((current) => ({
+      status: 'loading',
+      data: current.data,
+      message: instrument
+        ? `Loading ${instrument.canonical_symbol} news`
+        : fallbackSymbol
+          ? `Loading ${fallbackSymbol} news`
+          : 'Loading latest news'
+    }));
+
+    loadNewsFeed(query)
+      .then((data) => {
+        if (cancelled) {
+          return;
+        }
+        setState({
+          status: 'ready',
+          data,
+          message: data.count > 0 ? `${data.count} articles` : 'No articles cached'
+        });
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setState({
+          status: 'error',
+          data: null,
+          message: error instanceof Error ? error.message : 'News unavailable'
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [fallbackSymbol, instrument]);
+
+  return (
+    <Panel
+      title="News"
+      eyebrow="SOURCE LINKS"
+      className="dashboard-grid__wide"
+      actions={<NewsStatusPill state={state} />}
+    >
+      {state.status === 'error' ? (
+        <div className="usage-empty">
+          <CircleAlert size={20} />
+          <span>{state.message}</span>
+        </div>
+      ) : (
+        <NewsContent
+          articles={state.data?.results ?? []}
+          loading={state.status === 'loading'}
+        />
+      )}
+    </Panel>
+  );
+}
+
+function NewsStatusPill({ state }: { state: NewsPanelState }) {
+  const tone = state.status === 'error' ? 'error' : state.status === 'loading' ? 'fallback' : 'open';
+
+  return (
+    <span className={`auth-pill auth-pill--${tone}`}>
+      {state.status === 'loading' ? <RefreshCw size={14} /> : <Newspaper size={14} />}
+      {state.message}
+    </span>
+  );
+}
+
+function NewsContent({
+  articles,
+  loading
+}: {
+  articles: NewsArticle[];
+  loading: boolean;
+}) {
+  if (articles.length === 0) {
+    return (
+      <div className={loading ? 'news-panel is-loading' : 'news-panel'}>
+        <div className="usage-empty">
+          <Newspaper size={20} />
+          <span>Cached provider articles have not been fetched for this context yet.</span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={loading ? 'news-panel is-loading' : 'news-panel'}>
+      <div className="news-grid">
+        {articles.map((article) => (
+          <article className="news-card" key={article.id}>
+            <div className="news-card__meta">
+              <span>{article.source_name}</span>
+              <time dateTime={article.published_at}>{formatTimestamp(article.published_at)}</time>
+            </div>
+            <h3>{article.title}</h3>
+            <p>{article.summary || article.body_excerpt || 'No summary provided by the news provider.'}</p>
+            <div className="news-card__symbols">
+              {article.instruments.length > 0 ? (
+                article.instruments.slice(0, 4).map((linkedInstrument) => (
+                  <span key={linkedInstrument.instrument_id}>
+                    {linkedInstrument.matched_symbol || linkedInstrument.canonical_symbol}
+                  </span>
+                ))
+              ) : (
+                <span>Market-wide</span>
+              )}
+            </div>
+            <div className="news-card__footer">
+              <span>{article.author || article.provider}</span>
+              <a href={article.source_url} target="_blank" rel="noreferrer">
+                <ExternalLink size={16} />
+                <span>Source</span>
+              </a>
+            </div>
+          </article>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function FundamentalsPanel({ instrument }: { instrument: InstrumentCandidate | null }) {
   const [state, setState] = useState<FundamentalsPanelState>({
