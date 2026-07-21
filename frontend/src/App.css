@@ -874,6 +874,100 @@
   text-align: right;
 }
 
+.usage-list {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.usage-row {
+  display: grid;
+  grid-template-columns: 3.2rem minmax(0, 1fr) minmax(8rem, 0.8fr);
+  gap: 0.75rem;
+  align-items: center;
+  width: 100%;
+  min-height: 4.35rem;
+  padding: 0.7rem;
+  color: var(--ml-muted);
+  text-align: left;
+  cursor: pointer;
+  border: 1px solid rgba(156, 255, 0, 0.14);
+  border-radius: var(--ml-radius);
+  background: rgba(7, 13, 8, 0.72);
+}
+
+.usage-row:hover,
+.usage-row:focus-visible {
+  color: var(--ml-text);
+  border-color: var(--ml-border-strong);
+  outline: none;
+  box-shadow: var(--ml-shadow);
+}
+
+.usage-row__rank {
+  display: grid;
+  width: 2.35rem;
+  height: 2.35rem;
+  place-items: center;
+  color: var(--ml-lime);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  font-weight: 800;
+  border: 1px solid rgba(156, 255, 0, 0.22);
+  border-radius: var(--ml-radius);
+  background: rgba(156, 255, 0, 0.07);
+}
+
+.usage-row__instrument,
+.usage-row__meta {
+  display: grid;
+  gap: 0.22rem;
+  min-width: 0;
+}
+
+.usage-row__instrument strong {
+  overflow: hidden;
+  color: var(--ml-lime);
+  font-size: 0.98rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-row__instrument small,
+.usage-row__meta small {
+  overflow: hidden;
+  color: var(--ml-dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.68rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-row__meta {
+  justify-items: end;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-align: right;
+}
+
+.usage-row__meta strong {
+  color: var(--ml-cyan);
+  font-size: 0.78rem;
+}
+
+.usage-empty {
+  display: grid;
+  gap: 0.65rem;
+  min-height: 12rem;
+  place-items: center;
+  align-content: center;
+  padding: 1rem;
+  color: var(--ml-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-align: center;
+  border: 1px dashed rgba(156, 255, 0, 0.22);
+  border-radius: var(--ml-radius);
+  background: rgba(156, 255, 0, 0.035);
+}
+
 .realtime-console {
   display: grid;
   gap: 1rem;
@@ -1013,7 +1107,8 @@
   .candidate-table__head,
   .candidate-row,
   .price-strip,
-  .realtime-tape__row {
+  .realtime-tape__row,
+  .usage-row {
     grid-template-columns: 1fr 1fr;
   }
 
@@ -1037,6 +1132,17 @@
 
   .price-strip span {
     grid-column: 1 / -1;
+    text-align: left;
+  }
+
+  .usage-row__rank {
+    width: 100%;
+  }
+
+  .usage-row__instrument,
+  .usage-row__meta {
+    grid-column: 1 / -1;
+    justify-items: start;
     text-align: left;
   }
 
