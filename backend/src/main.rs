@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod db;
 mod email;
+mod fundamentals;
 mod ingestion;
 mod instrument_filter;
 mod instrument_search;
