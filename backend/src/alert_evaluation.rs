@@ -154,11 +154,26 @@ impl AlertEvaluationWorker {
         event: &AlertTriggeredEvent,
     ) -> Result<AlertDeliveryOutcome, AlertEvaluationError> {
         let payload = serde_json::to_string(event)?;
-        let redis_subscribers = self
+        let redis_subscribers = match self
             .redis
             .publish_user_alert_event(rule.user_sub.as_str(), payload.as_str())
-            .await?;
-        mark_in_app_delivered(&self.database, event.trigger_id).await?;
+            .await
+        {
+            Ok(subscribers) => {
+                mark_in_app_delivered(&self.database, event.trigger_id).await?;
+                subscribers
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    alert_id = event.alert_id,
+                    trigger_id = event.trigger_id,
+                    user_sub = %rule.user_sub,
+                    "failed to publish in-app alert event; continuing email delivery"
+                );
+                0
+            }
+        };
 
         let email_sent = match send_trigger_email(&self.config, rule, event).await {
             Ok(EmailDelivery::Sent { message_id }) => {

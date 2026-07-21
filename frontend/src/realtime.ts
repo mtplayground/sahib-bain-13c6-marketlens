@@ -316,8 +316,18 @@ export class MarketRealtimeClient {
   }
 
   private send(message: Record<string, unknown>) {
-    if (this.socket?.readyState === WebSocket.OPEN) {
-      this.socket.send(JSON.stringify(message));
+    const socket = this.socket;
+    if (socket?.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    try {
+      socket.send(JSON.stringify(message));
+    } catch (error) {
+      this.publishState({
+        status: 'error',
+        error: error instanceof Error ? error.message : 'Unable to send realtime message'
+      });
+      socket.close();
     }
   }
 
@@ -350,14 +360,20 @@ export class MarketRealtimeClient {
       if (!subscription) {
         continue;
       }
-      subscription.onEvent({
-        id: `${subscriptionId}-${receivedAt}`,
-        subscriptionId,
-        symbol: subscription.symbol || 'alerts',
-        redisChannel: message.redis_channel,
-        receivedAt,
-        payload: message.payload
-      });
+      try {
+        subscription.onEvent({
+          id: `${subscriptionId}-${receivedAt}`,
+          subscriptionId,
+          symbol: subscription.symbol || 'alerts',
+          redisChannel: message.redis_channel,
+          receivedAt,
+          payload: message.payload
+        });
+      } catch (error) {
+        this.publishState({
+          error: error instanceof Error ? error.message : 'Realtime event handler failed'
+        });
+      }
     }
   }
 
