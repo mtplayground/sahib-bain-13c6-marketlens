@@ -51,6 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let redis = RedisClient::connect(&config)?;
     alert_evaluation::spawn_worker(config.clone(), database.clone(), redis.clone());
+    ingestion::spawn_live_market_worker(config.clone(), database.clone(), redis.clone())?;
     let state = AppState::new(config, database, redis);
     let app = app(state);
     let listener = TcpListener::bind(addr).await?;
