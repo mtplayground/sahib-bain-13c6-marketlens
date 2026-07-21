@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
+    config::AppConfig,
     db::Database,
+    instruments::{live_seed_catalog_entries, InstrumentModelError, NewInstrument, NewInstrumentIdentifier},
     market_data::{
         AssetClass, LatestQuoteRequest, MarketDataError, MarketDataProvider, MarketQuote,
         ProviderInstrumentRef,
@@ -71,6 +73,40 @@ pub struct IngestionReport {
     pub persisted: usize,
     pub published: usize,
     pub redis_subscribers: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InstrumentCatalogSeedReport {
+    pub requested: usize,
+    pub upserted_instruments: usize,
+    pub upserted_identifiers: usize,
+}
+
+pub async fn seed_live_instrument_catalog(
+    database: &Database,
+    config: &AppConfig,
+) -> Result<InstrumentCatalogSeedReport, IngestionError> {
+    let entries =
+        live_seed_catalog_entries(config.live_market_provider_name.as_str(), &config.live_market_symbols)?;
+    let requested = entries.len();
+    let mut upserted_instruments = 0_usize;
+    let mut upserted_identifiers = 0_usize;
+
+    for entry in entries {
+        let instrument_id = upsert_instrument(database, &entry.instrument).await?;
+        upserted_instruments += 1;
+
+        for identifier in entry.identifiers {
+            upsert_instrument_identifier(database, instrument_id, &identifier).await?;
+            upserted_identifiers += 1;
+        }
+    }
+
+    Ok(InstrumentCatalogSeedReport {
+        requested,
+        upserted_instruments,
+        upserted_identifiers,
+    })
 }
 
 pub struct IngestionWorker<P> {
@@ -223,6 +259,88 @@ fn normalize_quote(
     })
 }
 
+async fn upsert_instrument(
+    database: &Database,
+    instrument: &NewInstrument,
+) -> Result<i64, IngestionError> {
+    let id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO instruments (
+            canonical_symbol,
+            display_name,
+            asset_class,
+            region,
+            country,
+            currency,
+            exchange,
+            issuer_name,
+            issuer_region,
+            maturity_date,
+            status
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        ON CONFLICT (lower(canonical_symbol), asset_class, region) DO UPDATE
+        SET
+            display_name = EXCLUDED.display_name,
+            country = EXCLUDED.country,
+            currency = EXCLUDED.currency,
+            exchange = EXCLUDED.exchange,
+            issuer_name = EXCLUDED.issuer_name,
+            issuer_region = EXCLUDED.issuer_region,
+            maturity_date = EXCLUDED.maturity_date,
+            status = EXCLUDED.status
+        RETURNING id
+        "#,
+    )
+    .bind(instrument.canonical_symbol.as_str())
+    .bind(instrument.display_name.as_str())
+    .bind(instrument.asset_class.as_str())
+    .bind(instrument.region.as_str())
+    .bind(instrument.country.as_deref())
+    .bind(instrument.currency.as_deref())
+    .bind(instrument.exchange.as_deref())
+    .bind(instrument.issuer_name.as_deref())
+    .bind(instrument.issuer_region.as_deref())
+    .bind(instrument.maturity_date)
+    .bind(instrument.status.as_str())
+    .fetch_one(database.pool())
+    .await?;
+
+    Ok(id)
+}
+
+async fn upsert_instrument_identifier(
+    database: &Database,
+    instrument_id: i64,
+    identifier: &NewInstrumentIdentifier,
+) -> Result<(), IngestionError> {
+    sqlx::query(
+        r#"
+        INSERT INTO instrument_identifiers (
+            instrument_id,
+            identifier_type,
+            identifier_value,
+            provider,
+            is_primary
+        )
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (identifier_type, lower(identifier_value), COALESCE(provider, '')) DO UPDATE
+        SET
+            instrument_id = EXCLUDED.instrument_id,
+            is_primary = EXCLUDED.is_primary
+        "#,
+    )
+    .bind(instrument_id)
+    .bind(identifier.identifier_type.as_str())
+    .bind(identifier.identifier_value.as_str())
+    .bind(identifier.provider.as_deref())
+    .bind(identifier.is_primary)
+    .execute(database.pool())
+    .await?;
+
+    Ok(())
+}
+
 async fn upsert_series(
     database: &Database,
     series: &NewPriceSeries,
@@ -371,6 +489,8 @@ pub enum IngestionError {
     Provider(#[from] MarketDataError),
     #[error("{0}")]
     Series(#[from] SeriesModelError),
+    #[error("{0}")]
+    Instrument(#[from] InstrumentModelError),
     #[error("database ingestion failed: {0}")]
     Database(#[from] sqlx::Error),
     #[error("redis publish failed: {0}")]

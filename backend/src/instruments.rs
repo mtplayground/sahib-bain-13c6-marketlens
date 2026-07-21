@@ -9,6 +9,12 @@ use thiserror::Error;
 
 use crate::market_data::{AssetClass, MarketInstrument};
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SeedInstrumentCatalogEntry {
+    pub instrument: NewInstrument,
+    pub identifiers: Vec<NewInstrumentIdentifier>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum InstrumentStatus {
@@ -248,6 +254,135 @@ impl NewInstrumentIdentifier {
     }
 }
 
+pub fn live_seed_catalog_entries(
+    provider: impl Into<String>,
+    symbols: &[String],
+) -> Result<Vec<SeedInstrumentCatalogEntry>, InstrumentModelError> {
+    let provider = normalized_required(provider.into(), InstrumentModelError::EmptyProvider)?;
+    symbols
+        .iter()
+        .map(|symbol| live_seed_catalog_entry(provider.as_str(), symbol.as_str()))
+        .collect()
+}
+
+fn live_seed_catalog_entry(
+    provider: &str,
+    symbol: &str,
+) -> Result<SeedInstrumentCatalogEntry, InstrumentModelError> {
+    let symbol = normalized_upper_required(symbol.to_owned(), InstrumentModelError::EmptySymbol)?;
+    let metadata = live_symbol_metadata(symbol.as_str());
+    let instrument = NewInstrument::new(
+        symbol.clone(),
+        metadata.display_name,
+        metadata.asset_class.clone(),
+        metadata.region,
+        metadata.country.clone(),
+        metadata.currency.clone(),
+        metadata.exchange,
+        metadata.issuer_name,
+        metadata.issuer_region,
+        None,
+    )?;
+    let provider_id = provider_identifier(provider, symbol.as_str(), &metadata.asset_class);
+    let mut identifiers = vec![
+        NewInstrumentIdentifier::new(
+            InstrumentIdentifierType::ProviderId,
+            provider_id,
+            Some(provider.to_owned()),
+            true,
+        )?,
+        NewInstrumentIdentifier::new(
+            InstrumentIdentifierType::Symbol,
+            symbol.clone(),
+            Some(provider.to_owned()),
+            true,
+        )?,
+    ];
+
+    if metadata.asset_class == AssetClass::Equity {
+        identifiers.push(NewInstrumentIdentifier::new(
+            InstrumentIdentifierType::Ticker,
+            symbol,
+            Some(provider.to_owned()),
+            false,
+        )?);
+    }
+
+    Ok(SeedInstrumentCatalogEntry {
+        instrument,
+        identifiers,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct LiveSymbolMetadata {
+    display_name: String,
+    asset_class: AssetClass,
+    region: String,
+    country: Option<String>,
+    currency: Option<String>,
+    exchange: Option<String>,
+    issuer_name: Option<String>,
+    issuer_region: Option<String>,
+}
+
+fn live_symbol_metadata(symbol: &str) -> LiveSymbolMetadata {
+    match symbol {
+        "SPY" => equity_metadata("SPDR S&P 500 ETF Trust", "NYSE Arca", Some("State Street")),
+        "NVDA" => equity_metadata("NVIDIA Corporation", "NASDAQ", Some("NVIDIA Corporation")),
+        "VIX" => equity_metadata("Cboe Volatility Index", "Cboe", Some("Cboe Global Markets")),
+        value if value.contains('/') => crypto_metadata(value),
+        value => equity_metadata(value, "US", None),
+    }
+}
+
+fn equity_metadata(
+    display_name: &str,
+    exchange: &str,
+    issuer_name: Option<&str>,
+) -> LiveSymbolMetadata {
+    LiveSymbolMetadata {
+        display_name: display_name.to_owned(),
+        asset_class: AssetClass::Equity,
+        region: "US".to_owned(),
+        country: Some("US".to_owned()),
+        currency: Some("USD".to_owned()),
+        exchange: Some(exchange.to_owned()),
+        issuer_name: issuer_name.map(str::to_owned),
+        issuer_region: Some("US".to_owned()),
+    }
+}
+
+fn crypto_metadata(symbol: &str) -> LiveSymbolMetadata {
+    let currency = symbol
+        .split_once('/')
+        .map(|(_, quote)| quote.to_ascii_uppercase())
+        .filter(|quote| !quote.is_empty())
+        .unwrap_or_else(|| "USD".to_owned());
+
+    LiveSymbolMetadata {
+        display_name: format!("{symbol} Crypto Pair"),
+        asset_class: AssetClass::Crypto,
+        region: "GLOBAL".to_owned(),
+        country: None,
+        currency: Some(currency),
+        exchange: Some("Crypto".to_owned()),
+        issuer_name: None,
+        issuer_region: None,
+    }
+}
+
+fn provider_identifier(provider: &str, symbol: &str, asset_class: &AssetClass) -> String {
+    if provider.eq_ignore_ascii_case("finnhub") && *asset_class == AssetClass::Crypto {
+        if let Some((base, quote)) = symbol.split_once('/') {
+            let quote = if quote == "USD" { "USDT" } else { quote };
+            return format!("BINANCE:{base}{quote}");
+        }
+    }
+
+    symbol.to_owned()
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum InstrumentModelError {
     #[error("provider cannot be empty")]
@@ -307,8 +442,8 @@ fn parse_optional_date(value: Option<&str>) -> Result<Option<NaiveDate>, Instrum
 #[cfg(test)]
 mod tests {
     use super::{
-        InstrumentIdentifierType, InstrumentModelError, InstrumentStatus, NewInstrument,
-        NewInstrumentIdentifier,
+        live_seed_catalog_entries, InstrumentIdentifierType, InstrumentModelError,
+        InstrumentStatus, NewInstrument, NewInstrumentIdentifier,
     };
     use crate::market_data::{AssetClass, MarketInstrument};
 
@@ -420,5 +555,43 @@ mod tests {
             .expect_err("invalid maturity date should be rejected");
 
         assert_eq!(error, InstrumentModelError::InvalidMaturityDate);
+    }
+
+    #[test]
+    fn builds_seed_catalog_entries_for_default_live_symbols() {
+        let symbols = vec![
+            "SPY".to_owned(),
+            "BTC/USD".to_owned(),
+            "NVDA".to_owned(),
+            "ETH/USD".to_owned(),
+            "VIX".to_owned(),
+        ];
+
+        let entries =
+            live_seed_catalog_entries("finnhub", &symbols).expect("seed metadata should build");
+
+        assert_eq!(entries.len(), 5);
+        let spy = entries
+            .iter()
+            .find(|entry| entry.instrument.canonical_symbol == "SPY")
+            .expect("SPY seed should exist");
+        assert_eq!(spy.instrument.asset_class, AssetClass::Equity);
+        assert_eq!(spy.instrument.region, "US");
+        assert!(spy.identifiers.iter().any(|identifier| {
+            identifier.identifier_type == InstrumentIdentifierType::ProviderId
+                && identifier.identifier_value == "SPY"
+        }));
+
+        let btc = entries
+            .iter()
+            .find(|entry| entry.instrument.canonical_symbol == "BTC/USD")
+            .expect("BTC/USD seed should exist");
+        assert_eq!(btc.instrument.asset_class, AssetClass::Crypto);
+        assert_eq!(btc.instrument.region, "GLOBAL");
+        assert_eq!(btc.instrument.currency, Some("USD".to_owned()));
+        assert!(btc.identifiers.iter().any(|identifier| {
+            identifier.identifier_type == InstrumentIdentifierType::ProviderId
+                && identifier.identifier_value == "BINANCE:BTCUSDT"
+        }));
     }
 }

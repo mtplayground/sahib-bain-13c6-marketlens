@@ -41,6 +41,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = config.socket_addr()?;
     let database = Database::connect(&config).await?;
     database.run_migrations().await?;
+    let seed_report = ingestion::seed_live_instrument_catalog(&database, &config).await?;
+    tracing::info!(
+        requested = seed_report.requested,
+        upserted_instruments = seed_report.upserted_instruments,
+        upserted_identifiers = seed_report.upserted_identifiers,
+        provider = %config.live_market_provider_name,
+        "seeded configured live instrument catalog"
+    );
     let redis = RedisClient::connect(&config)?;
     alert_evaluation::spawn_worker(config.clone(), database.clone(), redis.clone());
     let state = AppState::new(config, database, redis);
