@@ -84,7 +84,7 @@ impl AppConfig {
             jwt_secret: required_env("JWT_SECRET")?,
             market_data_provider_key: required_env("MARKET_DATA_PROVIDER_KEY")?,
             market_data_provider_name: optional_env("MARKET_DATA_PROVIDER_NAME")?
-                .unwrap_or_else(|| "http-json".to_owned()),
+                .unwrap_or_else(|| "finnhub".to_owned()),
             market_data_provider_base_url: optional_env("MARKET_DATA_PROVIDER_BASE_URL")?,
             market_data_request_timeout_seconds: parse_optional_u64(
                 "MARKET_DATA_REQUEST_TIMEOUT_SECONDS",
