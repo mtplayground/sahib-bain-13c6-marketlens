@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   BarChart3,
   Building2,
@@ -33,6 +33,7 @@ import {
   loadFundamentals,
   loadMostPopular,
   loadMostViewed,
+  loadTimeframeSeries,
   recordInstrumentView,
   searchInstruments,
   type AssetType,
@@ -436,6 +437,8 @@ function AuthenticatedDashboard({
         connection={realtime.connection}
         onToggleSymbol={handleToggleSymbol}
       />
+
+      <CrossAssetAnalyticsPanel selectedSymbols={selectedSymbols} />
 
       <MostViewedPanel
         revision={viewHistoryRevision}
@@ -908,6 +911,408 @@ function EmptyInstrumentPanel() {
       <span>No active instrument selected.</span>
     </div>
   );
+}
+
+type AnalyticsPoint = {
+  timestamp: number;
+  value: number;
+};
+
+type AnalyticsSeries = {
+  symbol: string;
+  points: AnalyticsPoint[];
+  returns: Map<number, number>;
+};
+
+type AnalyticsCorrelationCell = {
+  symbol: string;
+  correlation: number | null;
+  observations: number;
+};
+
+type AnalyticsPerformance = {
+  symbol: string;
+  startPrice: number;
+  endPrice: number;
+  totalReturn: number;
+  volatility: number;
+  observations: number;
+};
+
+type AnalyticsRisk = {
+  averageReturn: number;
+  volatility: number;
+  annualizedVolatility: number;
+  valueAtRisk95: number;
+  observations: number;
+};
+
+type AnalyticsResult = {
+  symbols: string[];
+  observations: number;
+  matrix: Array<{ symbol: string; correlations: AnalyticsCorrelationCell[] }>;
+  performance: AnalyticsPerformance[];
+  risk: AnalyticsRisk;
+};
+
+type AnalyticsPanelState =
+  | { status: 'idle'; result: null; message: string }
+  | { status: 'loading'; result: AnalyticsResult | null; message: string }
+  | { status: 'ready'; result: AnalyticsResult; message: string }
+  | { status: 'error'; result: null; message: string };
+
+function CrossAssetAnalyticsPanel({ selectedSymbols }: { selectedSymbols: string[] }) {
+  const [state, setState] = useState<AnalyticsPanelState>({
+    status: 'idle',
+    result: null,
+    message: 'Select two instruments'
+  });
+
+  useEffect(() => {
+    const symbols = uniqueSymbols(selectedSymbols).slice(0, MAX_COMPARISON_SYMBOLS);
+    if (symbols.length < 2) {
+      setState({ status: 'idle', result: null, message: 'Select two instruments' });
+      return;
+    }
+
+    let cancelled = false;
+    setState((current) => ({
+      status: 'loading',
+      result: current.result,
+      message: `Loading ${symbols.length} series`
+    }));
+
+    Promise.all(
+      symbols.map((symbol) =>
+        loadTimeframeSeries({ symbol, interval: '1m', limit: 160 })
+          .then((response) => seriesFromTimeframe(symbol, response.points))
+          .catch(() => seriesFromTimeframe(symbol, []))
+      )
+    )
+      .then((series) => {
+        if (cancelled) {
+          return;
+        }
+        const result = computeAnalytics(series);
+        setState({
+          status: 'ready',
+          result,
+          message: `${result.observations} aligned returns`
+        });
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setState({
+          status: 'error',
+          result: null,
+          message: error instanceof Error ? error.message : 'Analytics unavailable'
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSymbols]);
+
+  return (
+    <Panel
+      title="Cross-Asset Analytics"
+      eyebrow="CORRELATION + RISK"
+      className="dashboard-grid__wide"
+      actions={<AnalyticsStatusPill status={state.status} message={state.message} />}
+    >
+      {state.result ? (
+        <div className={state.status === 'loading' ? 'analytics-panel is-loading' : 'analytics-panel'}>
+          <CorrelationHeatmap result={state.result} />
+          <RelativePerformanceView performance={state.result.performance} />
+          <RiskView risk={state.result.risk} />
+        </div>
+      ) : (
+        <div className="usage-empty">
+          <BarChart3 size={20} />
+          <span>{state.message}</span>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function AnalyticsStatusPill({
+  status,
+  message
+}: {
+  status: AnalyticsPanelState['status'];
+  message: string;
+}) {
+  const tone = status === 'error' ? 'error' : status === 'loading' ? 'fallback' : 'open';
+
+  return (
+    <span className={`auth-pill auth-pill--${tone}`}>
+      {status === 'loading' ? <RefreshCw size={14} /> : <BarChart3 size={14} />}
+      {message}
+    </span>
+  );
+}
+
+function CorrelationHeatmap({ result }: { result: AnalyticsResult }) {
+  return (
+    <div className="analytics-card analytics-card--matrix">
+      <div className="analytics-card__header">
+        <BarChart3 size={18} />
+        <strong>Correlation Matrix</strong>
+        <span>{result.observations} obs</span>
+      </div>
+      <div
+        className="correlation-grid"
+        style={{ gridTemplateColumns: `minmax(4.5rem, 0.75fr) repeat(${result.symbols.length}, minmax(3.25rem, 1fr))` }}
+      >
+        <span className="correlation-grid__corner" />
+        {result.symbols.map((symbol) => (
+          <strong className="correlation-grid__label" key={`header-${symbol}`}>
+            {symbol}
+          </strong>
+        ))}
+        {result.matrix.map((row) => (
+          <Fragment key={row.symbol}>
+            <strong className="correlation-grid__label">
+              {row.symbol}
+            </strong>
+            {row.correlations.map((cell) => (
+              <span
+                className="correlation-cell"
+                key={`${row.symbol}-${cell.symbol}`}
+                style={correlationCellStyle(cell.correlation)}
+              >
+                {cell.correlation === null ? '-' : cell.correlation.toFixed(2)}
+              </span>
+            ))}
+          </Fragment>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RelativePerformanceView({ performance }: { performance: AnalyticsPerformance[] }) {
+  const maxAbsReturn = Math.max(
+    0.01,
+    ...performance.map((entry) => Math.abs(entry.totalReturn))
+  );
+
+  return (
+    <div className="analytics-card">
+      <div className="analytics-card__header">
+        <TrendingUp size={18} />
+        <strong>Relative Performance</strong>
+        <span>{performance.length} series</span>
+      </div>
+      <div className="performance-bars">
+        {performance.map((entry) => {
+          const width = `${Math.max(6, (Math.abs(entry.totalReturn) / maxAbsReturn) * 100)}%`;
+          return (
+            <div className="performance-row" key={entry.symbol}>
+              <span>{entry.symbol}</span>
+              <div className="performance-row__track">
+                <i
+                  className={entry.totalReturn >= 0 ? 'is-positive' : 'is-negative'}
+                  style={{ width }}
+                />
+              </div>
+              <strong>{formatSignedPercent(entry.totalReturn)}</strong>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function RiskView({ risk }: { risk: AnalyticsRisk }) {
+  return (
+    <div className="analytics-card">
+      <div className="analytics-card__header">
+        <ShieldCheck size={18} />
+        <strong>Portfolio Risk</strong>
+        <span>Equal weight</span>
+      </div>
+      <div className="risk-grid">
+        <FundamentalStat label="Avg return" value={formatSignedPercent(risk.averageReturn)} />
+        <FundamentalStat label="Volatility" value={formatPercentValue(risk.volatility)} />
+        <FundamentalStat label="Ann. volatility" value={formatPercentValue(risk.annualizedVolatility)} />
+        <FundamentalStat label="VaR 95" value={formatPercentValue(risk.valueAtRisk95)} />
+      </div>
+    </div>
+  );
+}
+
+function seriesFromTimeframe(symbol: string, points: Array<{ observed_at: string; close_price: string }>): AnalyticsSeries {
+  const orderedPoints = points
+    .map((point) => ({
+      timestamp: Date.parse(point.observed_at),
+      value: Number(point.close_price)
+    }))
+    .filter((point) => Number.isFinite(point.timestamp) && Number.isFinite(point.value) && point.value > 0)
+    .sort((left, right) => left.timestamp - right.timestamp);
+
+  const returns = new Map<number, number>();
+  for (let index = 1; index < orderedPoints.length; index += 1) {
+    const previous = orderedPoints[index - 1];
+    const current = orderedPoints[index];
+    const value = current.value / previous.value - 1;
+    if (Number.isFinite(value)) {
+      returns.set(current.timestamp, value);
+    }
+  }
+
+  return {
+    symbol,
+    points: orderedPoints,
+    returns
+  };
+}
+
+function computeAnalytics(series: AnalyticsSeries[]): AnalyticsResult {
+  const usableSeries = series.filter((entry) => entry.points.length >= 3 && entry.returns.size >= 2);
+  if (usableSeries.length < 2) {
+    throw new Error('At least two cached series need overlapping prices');
+  }
+  const symbols = usableSeries.map((entry) => entry.symbol);
+  const commonTimes = commonReturnTimes(usableSeries);
+  if (commonTimes.length < 2) {
+    throw new Error('Selected series do not overlap enough');
+  }
+  const alignedReturns = new Map<string, number[]>();
+  for (const entry of usableSeries) {
+    alignedReturns.set(
+      entry.symbol,
+      commonTimes.map((timestamp) => entry.returns.get(timestamp) ?? 0)
+    );
+  }
+
+  return {
+    symbols,
+    observations: commonTimes.length,
+    matrix: symbols.map((rowSymbol) => ({
+      symbol: rowSymbol,
+      correlations: symbols.map((columnSymbol) => {
+        const left = alignedReturns.get(rowSymbol) ?? [];
+        const right = alignedReturns.get(columnSymbol) ?? [];
+        return {
+          symbol: columnSymbol,
+          correlation: pearsonCorrelation(left, right),
+          observations: Math.min(left.length, right.length)
+        };
+      })
+    })),
+    performance: usableSeries.map((entry) =>
+      analyticsPerformance(entry, alignedReturns.get(entry.symbol) ?? [])
+    ),
+    risk: portfolioRisk(symbols, alignedReturns, commonTimes.length)
+  };
+}
+
+function commonReturnTimes(series: AnalyticsSeries[]) {
+  const [firstSeries, ...remainingSeries] = series;
+  if (!firstSeries) {
+    return [];
+  }
+
+  let common = new Set(firstSeries.returns.keys());
+  for (const entry of remainingSeries) {
+    common = new Set([...common].filter((timestamp) => entry.returns.has(timestamp)));
+  }
+  return [...common].sort((left, right) => left - right);
+}
+
+function analyticsPerformance(entry: AnalyticsSeries, returns: number[]): AnalyticsPerformance {
+  const startPrice = entry.points[0]?.value ?? 0;
+  const endPrice = entry.points[entry.points.length - 1]?.value ?? 0;
+  const totalReturn = startPrice > 0 ? endPrice / startPrice - 1 : 0;
+
+  return {
+    symbol: entry.symbol,
+    startPrice,
+    endPrice,
+    totalReturn,
+    volatility: sampleStdDev(returns),
+    observations: returns.length
+  };
+}
+
+function portfolioRisk(symbols: string[], alignedReturns: Map<string, number[]>, observations: number): AnalyticsRisk {
+  const weight = symbols.length > 0 ? 1 / symbols.length : 0;
+  const portfolioReturns = Array.from({ length: observations }, (_, index) =>
+    symbols.reduce((sum, symbol) => sum + ((alignedReturns.get(symbol)?.[index] ?? 0) * weight), 0)
+  );
+  const averageReturn = average(portfolioReturns);
+  const volatility = sampleStdDev(portfolioReturns);
+
+  return {
+    averageReturn,
+    volatility,
+    annualizedVolatility: volatility * Math.sqrt(252),
+    valueAtRisk95: 1.6448536269514722 * volatility - averageReturn,
+    observations
+  };
+}
+
+function pearsonCorrelation(left: number[], right: number[]) {
+  if (left.length !== right.length || left.length < 2) {
+    return null;
+  }
+  const leftMean = average(left);
+  const rightMean = average(right);
+  let numerator = 0;
+  let leftVariance = 0;
+  let rightVariance = 0;
+
+  for (let index = 0; index < left.length; index += 1) {
+    const leftDelta = left[index] - leftMean;
+    const rightDelta = right[index] - rightMean;
+    numerator += leftDelta * rightDelta;
+    leftVariance += leftDelta ** 2;
+    rightVariance += rightDelta ** 2;
+  }
+
+  const denominator = Math.sqrt(leftVariance) * Math.sqrt(rightVariance);
+  if (denominator <= Number.EPSILON) {
+    return null;
+  }
+  return Math.max(-1, Math.min(1, numerator / denominator));
+}
+
+function sampleStdDev(values: number[]) {
+  if (values.length < 2) {
+    return 0;
+  }
+  const mean = average(values);
+  const variance =
+    values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1);
+  return Math.sqrt(variance);
+}
+
+function average(values: number[]) {
+  if (values.length === 0) {
+    return 0;
+  }
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function correlationCellStyle(correlation: number | null) {
+  if (correlation === null) {
+    return {
+      background: 'rgba(156, 255, 0, 0.04)',
+      color: 'var(--ml-dim)'
+    };
+  }
+  const opacity = 0.12 + Math.min(0.5, Math.abs(correlation) * 0.5);
+  const color = correlation >= 0 ? '77, 238, 234' : '255, 95, 126';
+  return {
+    background: `rgba(${color}, ${opacity})`,
+    color: correlation >= 0 ? 'var(--ml-cyan)' : 'var(--ml-red)'
+  };
 }
 
 type FundamentalsPanelState =
@@ -1688,6 +2093,21 @@ function formatPercent(value: string | null | undefined) {
     ? numericValue.toLocaleString(undefined, { maximumFractionDigits: 2 })
     : value;
   return `${renderedValue}%`;
+}
+
+function formatPercentValue(value: number) {
+  if (!Number.isFinite(value)) {
+    return '-';
+  }
+  return `${(value * 100).toLocaleString(undefined, { maximumFractionDigits: 2 })}%`;
+}
+
+function formatSignedPercent(value: number) {
+  if (!Number.isFinite(value)) {
+    return '-';
+  }
+  const renderedValue = formatPercentValue(Math.abs(value));
+  return `${value >= 0 ? '+' : '-'}${renderedValue}`;
 }
 
 function formatTenor(months: number) {
