@@ -108,7 +108,7 @@ pub struct RelativePerformance {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PortfolioRiskSummary {
-    pub method: &'static str,
+    pub method: String,
     pub average_return: f64,
     pub volatility: f64,
     pub annualized_volatility: f64,
@@ -393,7 +393,7 @@ fn portfolio_risk(
     let annualized_volatility = volatility * TRADING_PERIODS_PER_YEAR.sqrt();
 
     Ok(PortfolioRiskSummary {
-        method: "equal_weight",
+        method: "equal_weight".to_owned(),
         average_return,
         volatility,
         annualized_volatility,

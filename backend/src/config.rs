@@ -1,6 +1,7 @@
 use std::{env, net::SocketAddr};
 
 use thiserror::Error;
+use url::Url;
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
@@ -44,6 +45,19 @@ pub enum ConfigError {
     NonPositive(&'static str),
     #[error("DATABASE_SSL_MODE must be one of disable, prefer, require, verify-ca, verify-full")]
     InvalidDatabaseSslMode,
+    #[error("{name} must be a valid URL: {source}")]
+    InvalidUrl {
+        name: &'static str,
+        source: url::ParseError,
+    },
+    #[error("DATABASE_URL must use postgres:// or postgresql://")]
+    InvalidDatabaseUrlScheme,
+    #[error("REDIS_URL must use redis:// or rediss://")]
+    InvalidRedisUrlScheme,
+    #[error("{0} must use http:// or https://")]
+    InvalidHttpUrlScheme(&'static str),
+    #[error("MCTAI_EMAIL_URL and MCTAI_EMAIL_APP_TOKEN must be configured together")]
+    IncompleteEmailConfig,
     #[error("HOST and PORT must form a valid socket address: {0}")]
     InvalidSocketAddress(#[from] std::net::AddrParseError),
 }
@@ -52,7 +66,7 @@ impl AppConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
         dotenvy::dotenv().ok();
 
-        Ok(Self {
+        let config = Self {
             host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_owned()),
             port: optional_env("PORT")?
                 .map(|value| value.parse::<u16>())
@@ -91,13 +105,47 @@ impl AppConfig {
             mctai_email_app_token: optional_env("MCTAI_EMAIL_APP_TOKEN")?,
             self_url: optional_env("SELF_URL")?,
             allowed_cors_origin: optional_env("ALLOWED_CORS_ORIGIN")?,
-        })
+        };
+
+        config.validate()?;
+        Ok(config)
     }
 
     pub fn socket_addr(&self) -> Result<SocketAddr, ConfigError> {
         format!("{}:{}", self.host, self.port)
             .parse()
             .map_err(ConfigError::from)
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        validate_database_url(&self.database_url)?;
+        validate_redis_url(&self.redis_url)?;
+        validate_http_url("MCTAI_AUTH_URL", self.mctai_auth_url.as_str())?;
+        validate_http_url("MCTAI_AUTH_JWKS_URL", self.mctai_auth_jwks_url.as_str())?;
+
+        if let Some(value) = self.market_data_provider_base_url.as_deref() {
+            validate_http_url("MARKET_DATA_PROVIDER_BASE_URL", value)?;
+        }
+        if let Some(value) = self.news_provider_base_url.as_deref() {
+            validate_http_url("NEWS_PROVIDER_BASE_URL", value)?;
+        }
+        if let Some(value) = self.self_url.as_deref() {
+            validate_http_url("SELF_URL", value)?;
+        }
+        if let Some(value) = self.allowed_cors_origin.as_deref() {
+            validate_http_url("ALLOWED_CORS_ORIGIN", value)?;
+        }
+
+        match (
+            self.mctai_email_url.as_deref(),
+            self.mctai_email_app_token.as_deref(),
+        ) {
+            (Some(value), Some(_)) => validate_http_url("MCTAI_EMAIL_URL", value)?,
+            (None, None) => {}
+            (Some(_), None) | (None, Some(_)) => return Err(ConfigError::IncompleteEmailConfig),
+        }
+
+        Ok(())
     }
 }
 
@@ -155,5 +203,33 @@ fn parse_database_ssl_mode() -> Result<Option<String>, ConfigError> {
         None => Ok(None),
         Some("disable" | "prefer" | "require" | "verify-ca" | "verify-full") => Ok(mode),
         Some(_) => Err(ConfigError::InvalidDatabaseSslMode),
+    }
+}
+
+fn parse_url(name: &'static str, value: &str) -> Result<Url, ConfigError> {
+    Url::parse(value).map_err(|source| ConfigError::InvalidUrl { name, source })
+}
+
+fn validate_database_url(value: &str) -> Result<(), ConfigError> {
+    let url = parse_url("DATABASE_URL", value)?;
+    match url.scheme() {
+        "postgres" | "postgresql" => Ok(()),
+        _ => Err(ConfigError::InvalidDatabaseUrlScheme),
+    }
+}
+
+fn validate_redis_url(value: &str) -> Result<(), ConfigError> {
+    let url = parse_url("REDIS_URL", value)?;
+    match url.scheme() {
+        "redis" | "rediss" => Ok(()),
+        _ => Err(ConfigError::InvalidRedisUrlScheme),
+    }
+}
+
+fn validate_http_url(name: &'static str, value: &str) -> Result<(), ConfigError> {
+    let url = parse_url(name, value)?;
+    match url.scheme() {
+        "http" | "https" => Ok(()),
+        _ => Err(ConfigError::InvalidHttpUrlScheme(name)),
     }
 }

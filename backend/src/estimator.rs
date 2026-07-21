@@ -120,7 +120,7 @@ struct ValidatedEstimatorQuery {
     limit: i64,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct AppliedEstimatorQuery {
     instrument_id: Option<i64>,
     symbol: Option<String>,
