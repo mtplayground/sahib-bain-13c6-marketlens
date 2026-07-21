@@ -708,6 +708,40 @@ mod tests {
     }
 
     #[test]
+    fn serialized_tick_payload_matches_websocket_chart_contract() {
+        let quote = MarketQuote {
+            instrument: ProviderInstrumentRef {
+                provider_id: "provider-spy".to_owned(),
+                symbol: Some("SPY".to_owned()),
+                asset_class: AssetClass::Equity,
+            },
+            price: 551.25,
+            currency: "USD".to_owned(),
+            as_of: as_of(),
+            bid: Some(551.2),
+            ask: Some(551.3),
+            yield_to_maturity: None,
+            duration: None,
+        };
+        let normalized = normalize_quote("finnhub", &instrument(), &quote)
+            .expect("quote should normalize");
+        let payload = serde_json::to_value(normalized.tick_payload(42))
+            .expect("tick payload should serialize");
+
+        assert_eq!(payload["type"], "market.tick");
+        assert_eq!(payload["provider"], "finnhub");
+        assert_eq!(payload["provider_instrument_id"], "provider-spy");
+        assert_eq!(payload["series_id"], 42);
+        assert_eq!(payload["symbol"], "SPY");
+        assert_eq!(payload["asset_class"], "equity");
+        assert_eq!(payload["price"], "551.25");
+        assert_eq!(payload["currency"], "USD");
+        assert_eq!(payload["as_of"], "2026-07-20T15:30:00Z");
+        assert_eq!(payload["bid"], "551.2");
+        assert_eq!(payload["ask"], "551.3");
+    }
+
+    #[test]
     fn rejects_nan_provider_prices() {
         let quote = MarketQuote {
             instrument: ProviderInstrumentRef {
