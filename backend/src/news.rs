@@ -282,7 +282,7 @@ pub async fn persist_articles(
     requested_limit: u16,
     articles: Vec<ProviderNewsArticle>,
 ) -> Result<NewsIngestReport, NewsError> {
-    let provider = normalize_required(provider, "NEWS_PROVIDER_NAME")?;
+    let provider = normalize_required(provider.to_owned(), "NEWS_PROVIDER_NAME")?;
     let mut persisted_articles = 0_usize;
     let mut article_instrument_links = 0_usize;
 

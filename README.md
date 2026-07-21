@@ -8,16 +8,41 @@ MarketLens is scaffolded as a Rust Axum backend and a React SPA frontend.
 ### Environment
 
 Copy `.env.example` to `.env` for local backend development and fill in the
-required values. Runtime configuration is read from environment variables only.
+required values. Runtime configuration is read from environment variables only,
+and the backend validates required variables and URL schemes before binding its
+HTTP listener.
+
+Required backend settings:
+
+- `DATABASE_URL`, which must be PostgreSQL (`postgres://` or `postgresql://`).
+- `REDIS_URL`, which must be `redis://` or `rediss://`.
+- `JWT_SECRET`, kept for legacy compatibility; new auth uses `mctai_session`.
+- `MCTAI_AUTH_URL`, `MCTAI_AUTH_APP_TOKEN`, and `MCTAI_AUTH_JWKS_URL`.
+- `MARKET_DATA_PROVIDER_KEY` and `NEWS_PROVIDER_KEY`.
+
+Optional URL settings are validated when present: `SELF_URL`,
+`ALLOWED_CORS_ORIGIN`, `MARKET_DATA_PROVIDER_BASE_URL`,
+`NEWS_PROVIDER_BASE_URL`, and `MCTAI_EMAIL_URL`. Configure
+`MCTAI_EMAIL_URL` and `MCTAI_EMAIL_APP_TOKEN` together, or omit both to skip
+email delivery in a bare local run.
 
 ### Backend
+
+```bash
+cp .env.example .env
+# Edit .env with PostgreSQL, Redis, auth, and provider values.
+cargo run -p marketlens-backend
+```
+
+For the managed workspace database:
 
 ```bash
 export DATABASE_URL=$(cat /workspace/.database_url)
 cargo run -p marketlens-backend
 ```
 
-The backend listens on `0.0.0.0:8080` by default and exposes:
+The backend listens on `0.0.0.0:8080` by default, runs embedded PostgreSQL
+migrations on startup, and exposes:
 
 - `GET /api/v1/health`
 - `GET /api/v1/config/status`
@@ -32,3 +57,15 @@ npm run dev
 
 The Vite dev server listens on `0.0.0.0:5173` and proxies `/api` requests to
 `http://127.0.0.1:8080` unless `VITE_API_PROXY_TARGET` is set.
+
+For a production-style static frontend build:
+
+```bash
+cd frontend
+npm install
+npm run build
+npm run preview -- --host 0.0.0.0 --port 5173
+```
+
+Set `VITE_API_BASE_URL` at build time only when the browser should call a
+different API origin instead of same-origin `/api` paths.
