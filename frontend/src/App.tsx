@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import './App.css';
 import { AppShell } from './components/AppShell';
+import { OverlayComparisonChart } from './components/OverlayComparisonChart';
 import { Panel } from './components/Panel';
 import {
   filterInstruments,
@@ -341,6 +342,8 @@ function AuthenticatedDashboard({
   const [chartCandidates, setChartCandidates] = useState<InstrumentCandidate[]>([]);
   const [activeInstrument, setActiveInstrument] = useState<InstrumentCandidate | null>(null);
   const [viewHistoryRevision, setViewHistoryRevision] = useState(0);
+  const [selectedSymbols, setSelectedSymbols] = useState(['SPY', 'BTC/USD']);
+  const realtime = useRealtimeMarketData(selectedSymbols);
   const candidateSymbols = useMemo(
     () => chartCandidates.map((candidate) => candidate.canonical_symbol),
     [chartCandidates]
@@ -358,6 +361,13 @@ function AuthenticatedDashboard({
       .catch((error) => {
         console.warn('Unable to record instrument view', error);
       });
+  }, []);
+  const handleToggleSymbol = useCallback((symbol: string) => {
+    setSelectedSymbols((current) =>
+      current.includes(symbol)
+        ? current.filter((currentSymbol) => currentSymbol !== symbol)
+        : [...current, symbol].slice(-6)
+    );
   }, []);
 
   return (
@@ -398,6 +408,14 @@ function AuthenticatedDashboard({
         onOpenInstrument={handleOpenInstrument}
       />
 
+      <OverlayComparisonChart
+        candidateSymbols={candidateSymbols}
+        selectedSymbols={selectedSymbols}
+        events={realtime.events}
+        connection={realtime.connection}
+        onToggleSymbol={handleToggleSymbol}
+      />
+
       <MostViewedPanel
         revision={viewHistoryRevision}
         onSelectInstrument={handleOpenInstrument}
@@ -405,7 +423,12 @@ function AuthenticatedDashboard({
 
       <MostPopularPanel onSelectInstrument={handleOpenInstrument} />
 
-      <RealtimeConsole candidateSymbols={candidateSymbols} />
+      <RealtimeConsole
+        candidateSymbols={candidateSymbols}
+        selectedSymbols={selectedSymbols}
+        realtime={realtime}
+        onToggleSymbol={handleToggleSymbol}
+      />
     </section>
   );
 }
@@ -893,21 +916,21 @@ function UsageList<T extends { instrument: InstrumentCandidate }>({
   );
 }
 
-function RealtimeConsole({ candidateSymbols }: { candidateSymbols: string[] }) {
-  const [selectedSymbols, setSelectedSymbols] = useState(['SPY', 'BTC/USD']);
-  const realtime = useRealtimeMarketData(selectedSymbols);
+function RealtimeConsole({
+  candidateSymbols,
+  selectedSymbols,
+  realtime,
+  onToggleSymbol
+}: {
+  candidateSymbols: string[];
+  selectedSymbols: string[];
+  realtime: ReturnType<typeof useRealtimeMarketData>;
+  onToggleSymbol: (symbol: string) => void;
+}) {
   const controlSymbols = useMemo(
     () => uniqueSymbols([...candidateSymbols, ...realtimeSymbols]).slice(0, 12),
     [candidateSymbols]
   );
-
-  function toggleSymbol(symbol: string) {
-    setSelectedSymbols((current) =>
-      current.includes(symbol)
-        ? current.filter((currentSymbol) => currentSymbol !== symbol)
-        : [...current, symbol]
-    );
-  }
 
   return (
     <Panel
@@ -925,7 +948,7 @@ function RealtimeConsole({ candidateSymbols }: { candidateSymbols: string[] }) {
                 className={selected ? 'symbol-toggle is-selected' : 'symbol-toggle'}
                 key={symbol}
                 type="button"
-                onClick={() => toggleSymbol(symbol)}
+                onClick={() => onToggleSymbol(symbol)}
                 aria-pressed={selected}
               >
                 <RadioTower size={15} />
