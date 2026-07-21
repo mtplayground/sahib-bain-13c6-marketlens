@@ -11,28 +11,37 @@ use sqlx::{FromRow, Postgres, Transaction};
 use thiserror::Error;
 
 use crate::{
+    config::AppConfig,
     db::Database,
+    email::{send_email, EmailDelivery},
     redis::{channels, RedisClient, RedisError},
 };
 
 const RECONNECT_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
 
-pub fn spawn_worker(database: Database, redis: RedisClient) {
+pub fn spawn_worker(config: AppConfig, database: Database, redis: RedisClient) {
     tokio::spawn(async move {
-        AlertEvaluationWorker::new(database, redis).run_forever().await;
+        AlertEvaluationWorker::new(config, database, redis)
+            .run_forever()
+            .await;
     });
 }
 
 #[derive(Debug, Clone)]
 pub struct AlertEvaluationWorker {
+    config: AppConfig,
     database: Database,
     redis: RedisClient,
 }
 
 impl AlertEvaluationWorker {
-    pub fn new(database: Database, redis: RedisClient) -> Self {
-        Self { database, redis }
+    pub fn new(config: AppConfig, database: Database, redis: RedisClient) -> Self {
+        Self {
+            config,
+            database,
+            redis,
+        }
     }
 
     pub async fn run_forever(&self) {
@@ -103,6 +112,7 @@ impl AlertEvaluationWorker {
         let evaluated_rules = rules.len();
         let mut triggered_rules = 0_usize;
         let mut published_events = 0_u64;
+        let mut emailed_alerts = 0_usize;
 
         for rule in rules {
             let Some(observed_value) = observed_value(&rule, tick) else {
@@ -123,17 +133,81 @@ impl AlertEvaluationWorker {
             };
 
             triggered_rules += 1;
-            let payload = serde_json::to_string(&event)?;
-            published_events += self
-                .redis
-                .publish_user_alert_event(rule.user_sub.as_str(), payload.as_str())
-                .await?;
+            let delivery = self.deliver_triggered_alert(&rule, &event).await?;
+            published_events += delivery.redis_subscribers;
+            if delivery.email_sent {
+                emailed_alerts += 1;
+            }
         }
 
         Ok(AlertEvaluationReport {
             evaluated_rules,
             triggered_rules,
             published_events,
+            emailed_alerts,
+        })
+    }
+
+    async fn deliver_triggered_alert(
+        &self,
+        rule: &ActiveAlertRule,
+        event: &AlertTriggeredEvent,
+    ) -> Result<AlertDeliveryOutcome, AlertEvaluationError> {
+        let payload = serde_json::to_string(event)?;
+        let redis_subscribers = self
+            .redis
+            .publish_user_alert_event(rule.user_sub.as_str(), payload.as_str())
+            .await?;
+        mark_in_app_delivered(&self.database, event.trigger_id).await?;
+
+        let email_sent = match send_trigger_email(&self.config, rule, event).await {
+            Ok(EmailDelivery::Sent { message_id }) => {
+                mark_email_delivery(
+                    &self.database,
+                    event.trigger_id,
+                    "sent",
+                    message_id.as_deref(),
+                    None,
+                )
+                .await?;
+                true
+            }
+            Ok(EmailDelivery::SkippedNotConfigured) => {
+                mark_email_delivery(
+                    &self.database,
+                    event.trigger_id,
+                    "skipped_not_configured",
+                    None,
+                    None,
+                )
+                .await?;
+                false
+            }
+            Err(error) => {
+                let error_message = error.to_string();
+                let error_message = truncated_error(error_message.as_str()).to_owned();
+                tracing::warn!(
+                    %error,
+                    alert_id = event.alert_id,
+                    trigger_id = event.trigger_id,
+                    user_sub = %rule.user_sub,
+                    "failed to deliver alert email"
+                );
+                mark_email_delivery(
+                    &self.database,
+                    event.trigger_id,
+                    "failed",
+                    None,
+                    Some(error_message.as_str()),
+                )
+                .await?;
+                false
+            }
+        };
+
+        Ok(AlertDeliveryOutcome {
+            redis_subscribers,
+            email_sent,
         })
     }
 }
@@ -160,12 +234,15 @@ pub struct AlertEvaluationReport {
     pub evaluated_rules: usize,
     pub triggered_rules: usize,
     pub published_events: u64,
+    pub emailed_alerts: usize,
 }
 
 #[derive(Debug, Clone, FromRow, PartialEq, Eq)]
 struct ActiveAlertRule {
     alert_id: i64,
     user_sub: String,
+    user_email: String,
+    user_name: Option<String>,
     instrument_id: i64,
     canonical_symbol: String,
     display_name: String,
@@ -195,6 +272,12 @@ struct AlertTriggeredEvent {
     triggered_at: DateTime<Utc>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct AlertDeliveryOutcome {
+    redis_subscribers: u64,
+    email_sent: bool,
+}
+
 async fn fetch_matching_rules(
     database: &Database,
     tick: &EvaluableMarketTick,
@@ -204,6 +287,8 @@ async fn fetch_matching_rules(
         SELECT
             alert.id AS alert_id,
             alert.user_sub,
+            app_user.email AS user_email,
+            app_user.name AS user_name,
             alert.instrument_id,
             instrument.canonical_symbol,
             instrument.display_name,
@@ -215,6 +300,7 @@ async fn fetch_matching_rules(
             alert.last_triggered_at
         FROM user_alert_rules alert
         INNER JOIN instruments instrument ON instrument.id = alert.instrument_id
+        INNER JOIN users app_user ON app_user.sub = alert.user_sub
         WHERE alert.status = 'active'
             AND instrument.status = 'active'
             AND instrument.asset_class = $4
@@ -251,6 +337,106 @@ async fn fetch_matching_rules(
     .await?;
 
     Ok(rows)
+}
+
+async fn mark_in_app_delivered(
+    database: &Database,
+    trigger_id: i64,
+) -> Result<(), AlertEvaluationError> {
+    sqlx::query(
+        r#"
+        UPDATE user_alert_rule_triggers
+        SET in_app_delivered_at = COALESCE(in_app_delivered_at, NOW())
+        WHERE id = $1
+        "#,
+    )
+    .bind(trigger_id)
+    .execute(database.pool())
+    .await?;
+
+    Ok(())
+}
+
+async fn mark_email_delivery(
+    database: &Database,
+    trigger_id: i64,
+    status: &str,
+    message_id: Option<&str>,
+    error: Option<&str>,
+) -> Result<(), AlertEvaluationError> {
+    sqlx::query(
+        r#"
+        UPDATE user_alert_rule_triggers
+        SET
+            email_delivery_status = $2,
+            email_message_id = $3,
+            email_delivered_at = CASE WHEN $2 = 'sent' THEN NOW() ELSE email_delivered_at END,
+            email_error = $4
+        WHERE id = $1
+        "#,
+    )
+    .bind(trigger_id)
+    .bind(status)
+    .bind(message_id)
+    .bind(error)
+    .execute(database.pool())
+    .await?;
+
+    Ok(())
+}
+
+async fn send_trigger_email(
+    config: &AppConfig,
+    rule: &ActiveAlertRule,
+    event: &AlertTriggeredEvent,
+) -> Result<EmailDelivery, crate::email::EmailError> {
+    let subject = format!(
+        "Alert triggered: {} {} {}",
+        event.symbol.as_str(),
+        event.metric.as_str(),
+        event.comparator.as_str()
+    );
+    let label = rule.label.as_deref().unwrap_or("Alert rule");
+    let greeting = rule
+        .user_name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("there");
+    let threshold_line = format!(
+        "{} {} {}",
+        event.metric.as_str(),
+        event.comparator.as_str(),
+        event.threshold
+    );
+    let observed_line = format!(
+        "{} observed at {} on {}",
+        event.observed_value,
+        event.tick_observed_at,
+        event.symbol.as_str()
+    );
+    let html = format!(
+        concat!(
+            "<p>Hello {greeting},</p>",
+            "<p>Your alert <strong>{label}</strong> triggered for <strong>{symbol}</strong>.</p>",
+            "<p>Rule: {threshold_line}<br>Observed: {observed_line}</p>"
+        ),
+        greeting = escape_html(greeting),
+        label = escape_html(label),
+        symbol = escape_html(event.symbol.as_str()),
+        threshold_line = escape_html(threshold_line.as_str()),
+        observed_line = escape_html(observed_line.as_str()),
+    );
+    let text = format!(
+        "Hello {greeting},\n\nYour alert {label} triggered for {symbol}.\nRule: {threshold_line}\nObserved: {observed_line}",
+        greeting = greeting,
+        label = label,
+        symbol = event.symbol.as_str(),
+        threshold_line = threshold_line,
+        observed_line = observed_line,
+    );
+
+    send_email(config, rule.user_email.as_str(), subject.as_str(), html.as_str(), text.as_str())
+        .await
 }
 
 async fn mark_triggered(
@@ -425,6 +611,34 @@ fn non_empty(value: &str) -> Option<&str> {
     }
 }
 
+fn escape_html(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn truncated_error(error: &str) -> &str {
+    const MAX_ERROR_LENGTH: usize = 500;
+    if error.len() <= MAX_ERROR_LENGTH {
+        return error;
+    }
+
+    let mut end = MAX_ERROR_LENGTH;
+    while !error.is_char_boundary(end) {
+        end -= 1;
+    }
+    &error[..end]
+}
+
 #[derive(Debug, Error)]
 pub enum AlertEvaluationError {
     #[error("database alert evaluation failed: {0}")]
@@ -441,7 +655,8 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::{
-        cooldown_elapsed, observed_value, threshold_crossed, ActiveAlertRule, EvaluableMarketTick,
+        cooldown_elapsed, escape_html, observed_value, threshold_crossed, truncated_error,
+        ActiveAlertRule, EvaluableMarketTick,
     };
 
     fn timestamp() -> chrono::DateTime<Utc> {
@@ -472,6 +687,8 @@ mod tests {
         ActiveAlertRule {
             alert_id: 7,
             user_sub: "user-1".to_owned(),
+            user_email: "trader@example.com".to_owned(),
+            user_name: Some("Trader".to_owned()),
             instrument_id: 42,
             canonical_symbol: "SPY".to_owned(),
             display_name: "SPDR S&P 500 ETF".to_owned(),
@@ -533,5 +750,19 @@ mod tests {
             now
         ));
         assert!(cooldown_elapsed(Some(now), 0, now));
+    }
+
+    #[test]
+    fn escapes_alert_email_html() {
+        assert_eq!(
+            escape_html(r#"<A&B "quoted">"#),
+            "&lt;A&amp;B &quot;quoted&quot;&gt;"
+        );
+    }
+
+    #[test]
+    fn truncates_error_without_breaking_utf8() {
+        let error = format!("{}é", "x".repeat(500));
+        assert_eq!(truncated_error(error.as_str()).len(), 500);
     }
 }
