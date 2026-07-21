@@ -968,6 +968,138 @@
   background: rgba(156, 255, 0, 0.035);
 }
 
+.instrument-picker {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.instrument-picker__selected,
+.instrument-picker__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  align-items: center;
+}
+
+.instrument-picker__search {
+  flex: 1 1 18rem;
+}
+
+.instrument-picker__empty-selection {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.5rem;
+  color: var(--ml-dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.selected-symbol-chip {
+  display: inline-flex;
+  gap: 0.45rem;
+  align-items: center;
+  min-height: 2.35rem;
+  padding: 0 0.7rem;
+  color: var(--ml-lime);
+  cursor: pointer;
+  border: 1px solid var(--ml-border-strong);
+  border-radius: var(--ml-radius);
+  background: rgba(156, 255, 0, 0.1);
+  box-shadow: 0 0 12px rgba(156, 255, 0, 0.12);
+}
+
+.selected-symbol-chip:hover,
+.selected-symbol-chip:focus-visible {
+  color: var(--ml-text);
+  outline: none;
+  background: rgba(156, 255, 0, 0.16);
+}
+
+.selected-symbol-chip span {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-weight: 800;
+}
+
+.instrument-picker__grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.instrument-picker-option {
+  display: grid;
+  grid-template-columns: 1.25rem minmax(0, 1fr) minmax(4.5rem, auto);
+  gap: 0.6rem;
+  align-items: center;
+  min-height: 4rem;
+  padding: 0.65rem;
+  color: var(--ml-muted);
+  text-align: left;
+  cursor: pointer;
+  border: 1px solid rgba(77, 238, 234, 0.16);
+  border-radius: var(--ml-radius);
+  background: rgba(7, 13, 8, 0.72);
+}
+
+.instrument-picker-option:hover,
+.instrument-picker-option:focus-visible,
+.instrument-picker-option.is-selected {
+  color: var(--ml-text);
+  border-color: var(--ml-border-strong);
+  outline: none;
+  box-shadow: var(--ml-shadow);
+}
+
+.instrument-picker-option.is-selected {
+  color: var(--ml-lime);
+  background: rgba(156, 255, 0, 0.09);
+}
+
+.instrument-picker-option:disabled {
+  color: var(--ml-dim);
+  cursor: not-allowed;
+  border-color: rgba(156, 255, 0, 0.09);
+  background: rgba(7, 13, 8, 0.44);
+  box-shadow: none;
+}
+
+.instrument-picker-option__mark {
+  display: grid;
+  place-items: center;
+  color: var(--ml-cyan);
+}
+
+.instrument-picker-option__body {
+  display: grid;
+  gap: 0.18rem;
+  min-width: 0;
+}
+
+.instrument-picker-option__body strong,
+.instrument-picker-option__body small,
+.instrument-picker-option__meta {
+  min-width: 0;
+  overflow: hidden;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.instrument-picker-option__body strong {
+  color: var(--ml-lime);
+  font-size: 0.86rem;
+}
+
+.instrument-picker-option__body small,
+.instrument-picker-option__meta {
+  color: var(--ml-dim);
+  font-size: 0.68rem;
+}
+
+.instrument-picker-option__meta {
+  justify-self: end;
+  color: var(--ml-cyan);
+}
+
 .overlay-chart-layout {
   display: grid;
   gap: 1rem;
@@ -1399,6 +1531,7 @@
   .dashboard-grid,
   .auth-grid,
   .discovery-grid,
+  .instrument-picker__grid,
   .signal-stack,
   .overlay-chart-legend,
   .realtime-console__meta {
