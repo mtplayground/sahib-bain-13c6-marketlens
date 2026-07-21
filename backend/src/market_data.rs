@@ -59,12 +59,24 @@ impl ProviderCapabilities {
             supports_delayed_quotes: true,
         }
     }
+
+    pub fn finnhub() -> Self {
+        Self {
+            asset_classes: vec![AssetClass::Equity, AssetClass::Crypto],
+            supports_global_equities: true,
+            supports_corporate_bonds: false,
+            supports_government_bonds: false,
+            supports_realtime_quotes: true,
+            supports_delayed_quotes: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AssetClass {
     Equity,
+    Crypto,
     CorporateBond,
     GovernmentBond,
 }
@@ -73,6 +85,7 @@ impl AssetClass {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Equity => "equity",
+            Self::Crypto => "crypto",
             Self::CorporateBond => "corporate_bond",
             Self::GovernmentBond => "government_bond",
         }
@@ -247,6 +260,73 @@ pub struct HttpMarketDataProvider {
     client: reqwest::Client,
 }
 
+#[derive(Debug, Clone)]
+pub enum ConfiguredMarketDataProvider {
+    Finnhub(FinnhubMarketDataProvider),
+    Http(HttpMarketDataProvider),
+}
+
+impl ConfiguredMarketDataProvider {
+    pub fn from_config(config: &AppConfig) -> Result<Self, MarketDataError> {
+        match config
+            .market_data_provider_name
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "finnhub" => FinnhubMarketDataProvider::from_config(config).map(Self::Finnhub),
+            _ => HttpMarketDataProvider::from_config(config).map(Self::Http),
+        }
+    }
+}
+
+#[async_trait]
+impl MarketDataProvider for ConfiguredMarketDataProvider {
+    fn name(&self) -> &str {
+        match self {
+            Self::Finnhub(provider) => provider.name(),
+            Self::Http(provider) => provider.name(),
+        }
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        match self {
+            Self::Finnhub(provider) => provider.capabilities(),
+            Self::Http(provider) => provider.capabilities(),
+        }
+    }
+
+    async fn search_instruments(
+        &self,
+        request: InstrumentSearchRequest,
+    ) -> Result<Vec<MarketInstrument>, MarketDataError> {
+        match self {
+            Self::Finnhub(provider) => provider.search_instruments(request).await,
+            Self::Http(provider) => provider.search_instruments(request).await,
+        }
+    }
+
+    async fn latest_quotes(
+        &self,
+        request: LatestQuoteRequest,
+    ) -> Result<Vec<MarketQuote>, MarketDataError> {
+        match self {
+            Self::Finnhub(provider) => provider.latest_quotes(request).await,
+            Self::Http(provider) => provider.latest_quotes(request).await,
+        }
+    }
+
+    async fn fundamentals(
+        &self,
+        request: FundamentalsRequest,
+    ) -> Result<ProviderFundamentalsSnapshot, MarketDataError> {
+        match self {
+            Self::Finnhub(provider) => provider.fundamentals(request).await,
+            Self::Http(provider) => provider.fundamentals(request).await,
+        }
+    }
+}
+
 impl HttpMarketDataProvider {
     pub fn from_config(config: &AppConfig) -> Result<Self, MarketDataError> {
         let base_url = config
@@ -322,6 +402,229 @@ impl HttpMarketDataProvider {
     }
 }
 
+const FINNHUB_DEFAULT_BASE_URL: &str = "https://finnhub.io";
+
+#[derive(Debug, Clone)]
+pub struct FinnhubMarketDataProvider {
+    name: String,
+    base_url: Url,
+    api_key: String,
+    timeout: Duration,
+    client: reqwest::Client,
+}
+
+#[derive(Debug, Deserialize)]
+struct FinnhubQuoteResponse {
+    #[serde(default)]
+    c: Option<f64>,
+    #[serde(default)]
+    h: Option<f64>,
+    #[serde(default)]
+    l: Option<f64>,
+    #[serde(default)]
+    o: Option<f64>,
+    #[serde(default)]
+    pc: Option<f64>,
+    #[serde(default)]
+    t: Option<i64>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FinnhubSearchResponse {
+    #[serde(default)]
+    result: Vec<FinnhubSearchResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FinnhubSearchResult {
+    #[serde(default)]
+    description: String,
+    #[serde(default, rename = "displaySymbol")]
+    display_symbol: String,
+    #[serde(default)]
+    symbol: String,
+    #[serde(default, rename = "type")]
+    instrument_type: String,
+}
+
+impl FinnhubMarketDataProvider {
+    pub fn from_config(config: &AppConfig) -> Result<Self, MarketDataError> {
+        Self::new(
+            config.market_data_provider_name.clone(),
+            config
+                .market_data_provider_base_url
+                .as_deref()
+                .unwrap_or(FINNHUB_DEFAULT_BASE_URL),
+            config.market_data_provider_key.clone(),
+            Duration::from_secs(config.market_data_request_timeout_seconds),
+        )
+    }
+
+    pub fn new(
+        name: impl Into<String>,
+        base_url: &str,
+        api_key: impl Into<String>,
+        timeout: Duration,
+    ) -> Result<Self, MarketDataError> {
+        let api_key = normalize_required(api_key.into(), "MARKET_DATA_PROVIDER_KEY")?;
+        let base_url = Url::parse(base_url).map_err(MarketDataError::InvalidBaseUrl)?;
+
+        Ok(Self {
+            name: normalize_required(name.into(), "MARKET_DATA_PROVIDER_NAME")?,
+            base_url,
+            api_key,
+            timeout,
+            client: reqwest::Client::builder()
+                .timeout(timeout)
+                .build()
+                .map_err(MarketDataError::Client)?,
+        })
+    }
+
+    async fn get_json<Response>(
+        &self,
+        path: &str,
+        query: Vec<(&str, String)>,
+    ) -> Result<Response, MarketDataError>
+    where
+        Response: for<'de> Deserialize<'de>,
+    {
+        let url = self.base_url.join(path).map_err(MarketDataError::InvalidBaseUrl)?;
+        let response = tokio::time::timeout(
+            self.timeout,
+            self.client
+                .get(url)
+                .query(&query)
+                .query(&[("token", self.api_key.as_str())])
+                .send(),
+        )
+        .await
+        .map_err(|_| MarketDataError::Timeout)?
+        .map_err(MarketDataError::Request)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_else(|error| {
+                format!("failed to read Finnhub error response: {error}")
+            });
+            return Err(classify_finnhub_http_error(status, body));
+        }
+
+        response
+            .json::<Response>()
+            .await
+            .map_err(MarketDataError::Request)
+    }
+
+    async fn fetch_quote(
+        &self,
+        instrument: ProviderInstrumentRef,
+    ) -> Result<MarketQuote, MarketDataError> {
+        let finnhub_symbol = to_finnhub_symbol(&instrument)?;
+        let response: FinnhubQuoteResponse = self
+            .get_json("/api/v1/quote", vec![("symbol", finnhub_symbol)])
+            .await?;
+
+        if let Some(error) = response.error.as_deref().filter(|value| !value.trim().is_empty()) {
+            return Err(classify_finnhub_message(error.to_owned()));
+        }
+
+        let price = response.c.ok_or_else(|| MarketDataError::MalformedProviderResponse {
+            provider: "finnhub",
+            message: "quote response is missing current price `c`".to_owned(),
+        })?;
+        if price <= 0.0 {
+            return Err(MarketDataError::NoQuote {
+                provider: "finnhub",
+                instrument: instrument.provider_id.clone(),
+            });
+        }
+
+        let timestamp = response.t.unwrap_or_default();
+        let as_of = if timestamp > 0 {
+            DateTime::<Utc>::from_timestamp(timestamp, 0).ok_or_else(|| {
+                MarketDataError::MalformedProviderResponse {
+                    provider: "finnhub",
+                    message: format!("quote response has invalid unix timestamp {timestamp}"),
+                }
+            })?
+        } else {
+            Utc::now()
+        };
+
+        Ok(MarketQuote {
+            currency: quote_currency(&instrument),
+            instrument,
+            price,
+            as_of,
+            bid: response.l,
+            ask: response.h,
+            yield_to_maturity: None,
+            duration: None,
+        })
+    }
+}
+
+#[async_trait]
+impl MarketDataProvider for FinnhubMarketDataProvider {
+    fn name(&self) -> &str {
+        self.name.as_str()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::finnhub()
+    }
+
+    async fn search_instruments(
+        &self,
+        request: InstrumentSearchRequest,
+    ) -> Result<Vec<MarketInstrument>, MarketDataError> {
+        let response: FinnhubSearchResponse = self
+            .get_json("/api/v1/search", vec![("q", request.query.clone())])
+            .await?;
+        let requested_classes = request.asset_classes;
+
+        Ok(response
+            .result
+            .into_iter()
+            .filter_map(|result| finnhub_search_result_to_instrument(result).ok())
+            .filter(|instrument| {
+                requested_classes.is_empty()
+                    || requested_classes.contains(&instrument.asset_class)
+            })
+            .take(request.limit as usize)
+            .collect())
+    }
+
+    async fn latest_quotes(
+        &self,
+        request: LatestQuoteRequest,
+    ) -> Result<Vec<MarketQuote>, MarketDataError> {
+        let mut quotes = Vec::with_capacity(request.instruments.len());
+        for instrument in request.instruments {
+            quotes.push(self.fetch_quote(instrument).await?);
+        }
+        Ok(quotes)
+    }
+
+    async fn fundamentals(
+        &self,
+        request: FundamentalsRequest,
+    ) -> Result<ProviderFundamentalsSnapshot, MarketDataError> {
+        Err(MarketDataError::UnsupportedOperation {
+            provider: self.name.clone(),
+            operation: format!(
+                "fundamentals for {}",
+                request.instrument.symbol.as_deref().unwrap_or(
+                    request.instrument.provider_id.as_str()
+                )
+            ),
+        })
+    }
+}
+
 #[async_trait]
 impl MarketDataProvider for HttpMarketDataProvider {
     fn name(&self) -> &str {
@@ -370,6 +673,24 @@ pub enum MarketDataError {
     Request(#[source] reqwest::Error),
     #[error("market data provider returned {status}: {body}")]
     Provider { status: StatusCode, body: String },
+    #[error("market data provider authentication failed: {body}")]
+    Authentication { body: String },
+    #[error("market data provider rate limit exceeded: {body}")]
+    RateLimited { body: String },
+    #[error("market data provider is temporarily unavailable ({status}): {body}")]
+    ProviderUnavailable { status: StatusCode, body: String },
+    #[error("{provider} response could not be understood: {message}")]
+    MalformedProviderResponse {
+        provider: &'static str,
+        message: String,
+    },
+    #[error("{provider} returned no quote for {instrument}")]
+    NoQuote {
+        provider: &'static str,
+        instrument: String,
+    },
+    #[error("{provider} does not support {operation}")]
+    UnsupportedOperation { provider: String, operation: String },
     #[error("latest quote request must include at least one instrument")]
     EmptyInstrumentList,
     #[error("provider instrument id cannot be empty")]
@@ -388,12 +709,135 @@ fn normalize_required(
     }
 }
 
+fn to_finnhub_symbol(instrument: &ProviderInstrumentRef) -> Result<String, MarketDataError> {
+    let raw = instrument
+        .symbol
+        .as_deref()
+        .unwrap_or(instrument.provider_id.as_str())
+        .trim();
+    if raw.is_empty() {
+        return Err(MarketDataError::EmptyProviderInstrumentId);
+    }
+
+    if raw.contains(':') {
+        return Ok(raw.to_ascii_uppercase());
+    }
+
+    let normalized = raw.to_ascii_uppercase();
+    if let Some((base, quote)) = normalized.split_once('/') {
+        let base = base.trim();
+        let quote = match quote.trim() {
+            "USD" => "USDT",
+            other => other,
+        };
+        if base.is_empty() || quote.is_empty() {
+            return Err(MarketDataError::MalformedProviderResponse {
+                provider: "finnhub",
+                message: format!("invalid crypto pair symbol `{raw}`"),
+            });
+        }
+        return Ok(format!("BINANCE:{base}{quote}"));
+    }
+
+    Ok(normalized)
+}
+
+fn quote_currency(instrument: &ProviderInstrumentRef) -> String {
+    instrument
+        .symbol
+        .as_deref()
+        .and_then(|symbol| symbol.split_once('/').map(|(_, quote)| quote.trim()))
+        .filter(|quote| !quote.is_empty())
+        .unwrap_or("USD")
+        .to_ascii_uppercase()
+}
+
+fn classify_finnhub_http_error(status: StatusCode, body: String) -> MarketDataError {
+    match status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => MarketDataError::Authentication { body },
+        StatusCode::TOO_MANY_REQUESTS => MarketDataError::RateLimited { body },
+        status if status.is_server_error() || status == StatusCode::REQUEST_TIMEOUT => {
+            MarketDataError::ProviderUnavailable { status, body }
+        }
+        _ => MarketDataError::Provider { status, body },
+    }
+}
+
+fn classify_finnhub_message(message: String) -> MarketDataError {
+    let normalized = message.to_ascii_lowercase();
+    if normalized.contains("token")
+        || normalized.contains("api key")
+        || normalized.contains("permission")
+        || normalized.contains("unauthorized")
+    {
+        MarketDataError::Authentication { body: message }
+    } else if normalized.contains("limit") || normalized.contains("too many") {
+        MarketDataError::RateLimited { body: message }
+    } else {
+        MarketDataError::Provider {
+            status: StatusCode::OK,
+            body: message,
+        }
+    }
+}
+
+fn finnhub_search_result_to_instrument(
+    result: FinnhubSearchResult,
+) -> Result<MarketInstrument, MarketDataError> {
+    let provider_id = normalize_required(result.symbol, "finnhub_symbol")?;
+    let symbol = normalize_required(
+        if result.display_symbol.trim().is_empty() {
+            provider_id.clone()
+        } else {
+            result.display_symbol
+        },
+        "finnhub_display_symbol",
+    )?;
+    let name = normalize_required(result.description, "finnhub_description")
+        .unwrap_or_else(|_| symbol.clone());
+    let asset_class = if result.instrument_type.to_ascii_lowercase().contains("crypto")
+        || symbol.contains('/')
+        || provider_id.to_ascii_uppercase().starts_with("BINANCE:")
+    {
+        AssetClass::Crypto
+    } else {
+        AssetClass::Equity
+    };
+    let currency = if asset_class == AssetClass::Crypto {
+        Some(quote_currency(&ProviderInstrumentRef {
+            provider_id: provider_id.clone(),
+            symbol: Some(symbol.clone()),
+            asset_class: asset_class.clone(),
+        }))
+    } else {
+        Some("USD".to_owned())
+    };
+
+    Ok(MarketInstrument {
+        provider_id,
+        symbol,
+        name,
+        asset_class,
+        currency,
+        country: None,
+        exchange: None,
+        isin: None,
+        cusip: None,
+        issuer: None,
+        maturity_date: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        AssetClass, FundamentalsRequest, HttpMarketDataProvider, InstrumentSearchRequest,
-        LatestQuoteRequest, MarketDataError, ProviderCapabilities, ProviderInstrumentRef,
+        classify_finnhub_http_error, quote_currency, to_finnhub_symbol, AssetClass,
+        ConfiguredMarketDataProvider, FinnhubMarketDataProvider, FundamentalsRequest,
+        HttpMarketDataProvider, InstrumentSearchRequest, LatestQuoteRequest, MarketDataError,
+        ProviderCapabilities, ProviderInstrumentRef,
     };
+    use crate::config::AppConfig;
+    use reqwest::StatusCode;
 
     #[test]
     fn exposes_global_equity_and_bond_capabilities() {
@@ -403,6 +847,9 @@ mod tests {
         assert!(capabilities.supports_corporate_bonds);
         assert!(capabilities.supports_government_bonds);
         assert!(capabilities.asset_classes.contains(&AssetClass::Equity));
+        assert!(ProviderCapabilities::finnhub()
+            .asset_classes
+            .contains(&AssetClass::Crypto));
         assert!(capabilities.asset_classes.contains(&AssetClass::CorporateBond));
         assert!(capabilities.asset_classes.contains(&AssetClass::GovernmentBond));
     }
@@ -480,6 +927,86 @@ mod tests {
             Err(MarketDataError::EmptySetting {
                 setting: "MARKET_DATA_PROVIDER_KEY"
             })
+        ));
+    }
+
+    #[test]
+    fn finnhub_adapter_translates_equity_and_crypto_symbols() {
+        let equity = ProviderInstrumentRef {
+            provider_id: "SPY".to_owned(),
+            symbol: Some("spy".to_owned()),
+            asset_class: AssetClass::Equity,
+        };
+        assert_eq!(to_finnhub_symbol(&equity).unwrap(), "SPY");
+        assert_eq!(quote_currency(&equity), "USD");
+
+        let crypto = ProviderInstrumentRef {
+            provider_id: "BTC/USD".to_owned(),
+            symbol: Some("BTC/USD".to_owned()),
+            asset_class: AssetClass::Crypto,
+        };
+        assert_eq!(to_finnhub_symbol(&crypto).unwrap(), "BINANCE:BTCUSDT");
+        assert_eq!(quote_currency(&crypto), "USD");
+
+        let provider_specific = ProviderInstrumentRef {
+            provider_id: "BINANCE:ETHUSDT".to_owned(),
+            symbol: None,
+            asset_class: AssetClass::Crypto,
+        };
+        assert_eq!(
+            to_finnhub_symbol(&provider_specific).unwrap(),
+            "BINANCE:ETHUSDT"
+        );
+    }
+
+    #[test]
+    fn finnhub_adapter_classifies_auth_rate_limit_and_transient_errors() {
+        assert!(matches!(
+            classify_finnhub_http_error(StatusCode::UNAUTHORIZED, "bad token".to_owned()),
+            MarketDataError::Authentication { .. }
+        ));
+        assert!(matches!(
+            classify_finnhub_http_error(StatusCode::TOO_MANY_REQUESTS, "slow down".to_owned()),
+            MarketDataError::RateLimited { .. }
+        ));
+        assert!(matches!(
+            classify_finnhub_http_error(StatusCode::BAD_GATEWAY, "upstream".to_owned()),
+            MarketDataError::ProviderUnavailable { .. }
+        ));
+    }
+
+    #[test]
+    fn configured_provider_selects_finnhub_by_name() {
+        let config = AppConfig {
+            host: "0.0.0.0".to_owned(),
+            port: 8080,
+            database_url: "postgres://postgres:postgres@localhost:5432/marketlens".to_owned(),
+            database_max_connections: 5,
+            database_connect_timeout_seconds: 5,
+            database_ssl_mode: None,
+            redis_url: "redis://localhost:6379".to_owned(),
+            jwt_secret: "legacy".to_owned(),
+            market_data_provider_key: "finnhub-key".to_owned(),
+            market_data_provider_name: "finnhub".to_owned(),
+            market_data_provider_base_url: Some("https://finnhub.io".to_owned()),
+            market_data_request_timeout_seconds: 5,
+            news_provider_key: "news-key".to_owned(),
+            news_provider_name: "http-json-news".to_owned(),
+            news_provider_base_url: None,
+            news_provider_request_timeout_seconds: 5,
+            mctai_auth_url: "https://auth.mctai.app".to_owned(),
+            mctai_auth_app_token: "app_test".to_owned(),
+            mctai_auth_jwks_url: "https://auth.mctai.app/.well-known/jwks.json".to_owned(),
+            mctai_email_url: None,
+            mctai_email_app_token: None,
+            self_url: None,
+            allowed_cors_origin: None,
+        };
+
+        let provider = ConfiguredMarketDataProvider::from_config(&config).unwrap();
+        assert!(matches!(
+            provider,
+            ConfiguredMarketDataProvider::Finnhub(FinnhubMarketDataProvider { .. })
         ));
     }
 }
