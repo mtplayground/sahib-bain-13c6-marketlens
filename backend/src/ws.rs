@@ -60,7 +60,7 @@ pub fn contract() -> WebSocketContract {
         subscriptions: SubscriptionContract {
             market_ticks: MARKET_TICKS_SUBSCRIPTION_HELP,
             alert_events:
-                "subscribe with channel=alert_events; scoped to the authenticated user's Redis channel",
+                "subscribe with channel=alert_events; alert.triggered payloads are scoped to the authenticated user's Redis channel",
         },
     }
 }
