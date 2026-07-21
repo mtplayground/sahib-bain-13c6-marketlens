@@ -44,6 +44,7 @@ import {
   deleteWatchlist,
   filterInstruments,
   generateEstimatorReport,
+  loadConfigStatus,
   loadAlertRules,
   loadEstimatorReport,
   loadEstimatorReportHistory,
@@ -63,6 +64,7 @@ import {
   type AlertRule,
   type AlertStatus,
   type AssetType,
+  type BackendConfigStatus,
   type BondYieldCurvePoint,
   type CompanyFinancial,
   type CreditRating,
@@ -83,6 +85,7 @@ import {
   useRealtimeMarketData,
   type RealtimeAlertEvent,
   type RealtimeConnectionState,
+  type RealtimeSymbolSnapshot,
   type RealtimeTickEvent
 } from './realtime';
 import {
@@ -132,6 +135,7 @@ const defaultDiscoveryFilters: InstrumentDiscoveryFilters = {
 const assetTypeOptions: Array<{ value: AssetType; label: string }> = [
   { value: '', label: 'All assets' },
   { value: 'equity', label: 'Equities' },
+  { value: 'crypto', label: 'Crypto' },
   { value: 'corporate_bond', label: 'Corporate bonds' },
   { value: 'government_bond', label: 'Government bonds' }
 ];
@@ -388,11 +392,39 @@ function AuthenticatedDashboard({
   const [activeInstrument, setActiveInstrument] = useState<InstrumentCandidate | null>(null);
   const [viewHistoryRevision, setViewHistoryRevision] = useState(0);
   const [selectedSymbols, setSelectedSymbols] = useState(['SPY', 'BTC/USD']);
+  const [configStatus, setConfigStatus] = useState<BackendConfigStatus | null>(null);
+  const [configError, setConfigError] = useState<string | null>(null);
   const realtime = useRealtimeMarketData(selectedSymbols);
+  const liveFeed = useMemo(
+    () => deriveLiveFeedStatus(configStatus, configError, realtime.snapshots, realtime.connection),
+    [configError, configStatus, realtime.connection, realtime.snapshots]
+  );
   const candidateSymbols = useMemo(
     () => chartCandidates.map((candidate) => candidate.canonical_symbol),
     [chartCandidates]
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    loadConfigStatus()
+      .then((status) => {
+        if (cancelled) {
+          return;
+        }
+        setConfigStatus(status);
+        setConfigError(null);
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setConfigError(error instanceof Error ? error.message : 'Unable to load feed config');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const handleCandidatesChange = useCallback((candidates: InstrumentCandidate[]) => {
     setChartCandidates(candidates);
   }, []);
@@ -451,6 +483,7 @@ function AuthenticatedDashboard({
       <MarketDiscovery
         candidates={chartCandidates}
         activeInstrument={activeInstrument}
+        liveFeed={liveFeed}
         onCandidatesChange={handleCandidatesChange}
         onPreviewInstrument={handlePreviewInstrument}
         onOpenInstrument={handleOpenInstrument}
@@ -459,6 +492,8 @@ function AuthenticatedDashboard({
       <InstrumentPickerPanel
         candidates={chartCandidates}
         selectedSymbols={selectedSymbols}
+        snapshots={realtime.snapshots}
+        liveFeed={liveFeed}
         onSetSymbols={handleSetSymbols}
         onToggleSymbol={handleToggleSymbol}
       />
@@ -505,6 +540,7 @@ function AuthenticatedDashboard({
         candidateSymbols={candidateSymbols}
         selectedSymbols={selectedSymbols}
         realtime={realtime}
+        liveFeed={liveFeed}
         onToggleSymbol={handleToggleSymbol}
       />
     </section>
@@ -516,15 +552,96 @@ type DiscoveryRequestState =
   | { status: 'ready'; message: string }
   | { status: 'error'; message: string };
 
+type LiveFeedStatus =
+  | 'loading'
+  | 'no_provider_configured'
+  | 'awaiting_first_tick'
+  | 'receiving_live_data'
+  | 'error';
+
+type LiveFeedSummary = {
+  status: LiveFeedStatus;
+  providerName: string;
+  sourceLabel: string;
+  message: string;
+  lastTickAt: string | null;
+};
+
+function deriveLiveFeedStatus(
+  config: BackendConfigStatus | null,
+  configError: string | null,
+  snapshots: RealtimeSymbolSnapshot[],
+  connection: RealtimeConnectionState
+): LiveFeedSummary {
+  if (configError) {
+    return {
+      status: 'error',
+      providerName: 'unknown',
+      sourceLabel: 'Config unavailable',
+      message: configError,
+      lastTickAt: null
+    };
+  }
+  if (!config) {
+    return {
+      status: 'loading',
+      providerName: 'loading',
+      sourceLabel: 'Loading feed config',
+      message: 'Loading live feed configuration',
+      lastTickAt: null
+    };
+  }
+
+  const providerName = config.live_market_provider_name || config.market_data_provider_name || 'market data';
+  const configured = config.live_market_ingestion_enabled && config.market_data_provider_key_configured;
+  const tickTimes = snapshots
+    .map((snapshot) => snapshot.lastTickAt || snapshot.receivedAt)
+    .filter(Boolean)
+    .sort();
+  const latestTickAt = tickTimes.length > 0 ? tickTimes[tickTimes.length - 1] : null;
+
+  if (!configured) {
+    return {
+      status: 'no_provider_configured',
+      providerName,
+      sourceLabel: `${providerName} feed not configured`,
+      message: 'No live market provider is configured. Seeded symbols are shown, but live ticks are disabled.',
+      lastTickAt: null
+    };
+  }
+  if (latestTickAt) {
+    return {
+      status: 'receiving_live_data',
+      providerName,
+      sourceLabel: `${providerName} live feed`,
+      message: 'Receiving live market data',
+      lastTickAt: latestTickAt
+    };
+  }
+
+  return {
+    status: 'awaiting_first_tick',
+    providerName,
+    sourceLabel: `${providerName} live feed`,
+    message:
+      connection.status === 'open'
+        ? 'Waiting for live market ticks'
+        : 'Connecting to live market ticks',
+    lastTickAt: null
+  };
+}
+
 function MarketDiscovery({
   candidates,
   activeInstrument,
+  liveFeed,
   onCandidatesChange,
   onPreviewInstrument,
   onOpenInstrument
 }: {
   candidates: InstrumentCandidate[];
   activeInstrument: InstrumentCandidate | null;
+  liveFeed: LiveFeedSummary;
   onCandidatesChange: (candidates: InstrumentCandidate[]) => void;
   onPreviewInstrument: (instrument: InstrumentCandidate | null) => void;
   onOpenInstrument: (instrument: InstrumentCandidate) => void;
@@ -667,9 +784,11 @@ function MarketDiscovery({
             </div>
             <ListFilter size={18} aria-hidden="true" />
           </div>
+          <LiveFeedBanner liveFeed={liveFeed} compact />
           <CandidateRows
             candidates={candidates}
             activeInstrument={activeInstrument}
+            emptyMessage={discoveryEmptyMessage(liveFeed)}
             onSelect={onOpenInstrument}
           />
         </div>
@@ -689,11 +808,15 @@ function MarketDiscovery({
 function InstrumentPickerPanel({
   candidates,
   selectedSymbols,
+  snapshots,
+  liveFeed,
   onSetSymbols,
   onToggleSymbol
 }: {
   candidates: InstrumentCandidate[];
   selectedSymbols: string[];
+  snapshots: RealtimeSymbolSnapshot[];
+  liveFeed: LiveFeedSummary;
   onSetSymbols: (symbols: string[]) => void;
   onToggleSymbol: (symbol: string) => void;
 }) {
@@ -705,6 +828,13 @@ function InstrumentPickerPanel({
     }
     return bySymbol;
   }, [candidates]);
+  const snapshotBySymbol = useMemo(() => {
+    const bySymbol = new Map<string, RealtimeSymbolSnapshot>();
+    for (const snapshot of snapshots) {
+      bySymbol.set(snapshot.symbol, snapshot);
+    }
+    return bySymbol;
+  }, [snapshots]);
   const pickerOptions = useMemo(
     () => uniqueSymbols([
       ...selectedSymbols,
@@ -752,20 +882,25 @@ function InstrumentPickerPanel({
       actions={<ComparisonCountPill selectedCount={selectedSymbols.length} />}
     >
       <div className="instrument-picker">
+        <LiveFeedBanner liveFeed={liveFeed} compact />
         <div className="instrument-picker__selected" aria-label="Selected comparison instruments">
           {selectedSymbols.length > 0 ? (
-            selectedSymbols.map((symbol) => (
-              <button
-                className="selected-symbol-chip"
-                key={symbol}
-                type="button"
-                onClick={() => onToggleSymbol(symbol)}
-                aria-label={`Remove ${symbol} from comparison`}
-              >
-                <span>{symbol}</span>
-                <X size={14} />
-              </button>
-            ))
+            selectedSymbols.map((symbol) => {
+              const snapshot = snapshotBySymbol.get(symbol);
+              return (
+                <button
+                  className="selected-symbol-chip selected-symbol-chip--stacked"
+                  key={symbol}
+                  type="button"
+                  onClick={() => onToggleSymbol(symbol)}
+                  aria-label={`Remove ${symbol} from comparison`}
+                >
+                  <span>{symbol}</span>
+                  <small>{snapshotLabel(snapshot)}</small>
+                  <X size={14} />
+                </button>
+              );
+            })
           ) : (
             <span className="instrument-picker__empty-selection">No instruments selected</span>
           )}
@@ -816,6 +951,7 @@ function InstrumentPickerPanel({
               const candidate = candidateBySymbol.get(symbol);
               const selected = selectedSymbols.includes(symbol);
               const disabled = !selected && selectedSymbols.length >= MAX_COMPARISON_SYMBOLS;
+              const snapshot = snapshotBySymbol.get(symbol);
               return (
                 <button
                   className={selected ? 'instrument-picker-option is-selected' : 'instrument-picker-option'}
@@ -833,7 +969,7 @@ function InstrumentPickerPanel({
                     <small>{candidate?.display_name || 'Realtime symbol'}</small>
                   </span>
                   <span className="instrument-picker-option__meta">
-                    {candidate ? assetTypeLabel(candidate.asset_class) : 'Live'}
+                    {snapshot ? snapshotLabel(snapshot) : candidate ? assetTypeLabel(candidate.asset_class) : 'Awaiting tick'}
                   </span>
                 </button>
               );
@@ -1611,20 +1747,87 @@ function DiscoveryStatusPill({ state }: { state: DiscoveryRequestState }) {
   );
 }
 
+function LiveFeedBanner({
+  liveFeed,
+  compact = false
+}: {
+  liveFeed: LiveFeedSummary;
+  compact?: boolean;
+}) {
+  const Icon =
+    liveFeed.status === 'receiving_live_data'
+      ? Wifi
+      : liveFeed.status === 'error' || liveFeed.status === 'no_provider_configured'
+        ? CircleAlert
+        : liveFeed.status === 'loading'
+          ? RefreshCw
+          : RadioTower;
+
+  return (
+    <div className={`live-feed-banner live-feed-banner--${liveFeed.status}${compact ? ' live-feed-banner--compact' : ''}`}>
+      <Icon size={18} aria-hidden="true" />
+      <span>
+        <strong>{liveFeed.sourceLabel}</strong>
+        <small>{liveFeed.message}</small>
+      </span>
+      {liveFeed.lastTickAt ? (
+        <time dateTime={liveFeed.lastTickAt}>Last tick {formatTimestamp(liveFeed.lastTickAt)}</time>
+      ) : null}
+    </div>
+  );
+}
+
+function RealtimeSnapshotGrid({ snapshots }: { snapshots: RealtimeSymbolSnapshot[] }) {
+  if (snapshots.length === 0) {
+    return (
+      <div className="realtime-snapshot-grid realtime-snapshot-grid--empty">
+        <Info size={18} />
+        <span>Select symbols to monitor the live feed.</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="realtime-snapshot-grid" aria-label="Live symbol status">
+      {snapshots.map((snapshot) => (
+        <article className="realtime-snapshot-card" key={snapshot.symbol}>
+          <div className="realtime-snapshot-card__head">
+            <strong>{snapshot.symbol}</strong>
+            <span>{snapshot.provider || 'provider pending'}</span>
+          </div>
+          <div className="realtime-snapshot-card__price">
+            {snapshot.price === null ? 'Awaiting tick' : formatSnapshotPrice(snapshot)}
+          </div>
+          <div className="realtime-snapshot-card__meta">
+            <span className={snapshot.change !== null && snapshot.change < 0 ? 'is-negative' : 'is-positive'}>
+              {snapshot.change === null ? 'change pending' : formatSignedNumber(snapshot.change)}
+            </span>
+            <time dateTime={snapshot.lastTickAt || snapshot.receivedAt || undefined}>
+              {snapshot.lastTickAt ? formatTimestamp(snapshot.lastTickAt) : 'Waiting for live market ticks'}
+            </time>
+          </div>
+        </article>
+      ))}
+    </div>
+  );
+}
+
 function CandidateRows({
   candidates,
   activeInstrument,
+  emptyMessage,
   onSelect
 }: {
   candidates: InstrumentCandidate[];
   activeInstrument: InstrumentCandidate | null;
+  emptyMessage: string;
   onSelect: (instrument: InstrumentCandidate) => void;
 }) {
   if (candidates.length === 0) {
     return (
       <div className="candidate-empty">
         <SearchIcon size={20} />
-        <span>No matching instruments.</span>
+        <span>{emptyMessage}</span>
       </div>
     );
   }
@@ -3133,11 +3336,13 @@ function RealtimeConsole({
   candidateSymbols,
   selectedSymbols,
   realtime,
+  liveFeed,
   onToggleSymbol
 }: {
   candidateSymbols: string[];
   selectedSymbols: string[];
   realtime: ReturnType<typeof useRealtimeMarketData>;
+  liveFeed: LiveFeedSummary;
   onToggleSymbol: (symbol: string) => void;
 }) {
   const controlSymbols = useMemo(
@@ -3175,6 +3380,9 @@ function RealtimeConsole({
           </button>
         </div>
 
+        <LiveFeedBanner liveFeed={liveFeed} />
+        <RealtimeSnapshotGrid snapshots={realtime.snapshots} />
+
         <div className="realtime-console__meta">
           <ContractItem label="Subscriptions" value={String(realtime.connection.activeSubscriptions)} />
           <ContractItem label="Last socket" value={timestampOrDash(realtime.connection.lastOpenedAt)} />
@@ -3182,7 +3390,7 @@ function RealtimeConsole({
           <ContractItem label="Fallback" value={fallbackLabel(realtime.connection)} />
         </div>
 
-        <RealtimeEventTape events={realtime.events} />
+        <RealtimeEventTape events={realtime.events} liveFeed={liveFeed} />
       </div>
     </Panel>
   );
@@ -3200,12 +3408,18 @@ function RealtimeStatusPill({ connection }: { connection: RealtimeConnectionStat
   );
 }
 
-function RealtimeEventTape({ events }: { events: RealtimeTickEvent[] }) {
+function RealtimeEventTape({
+  events,
+  liveFeed
+}: {
+  events: RealtimeTickEvent[];
+  liveFeed: LiveFeedSummary;
+}) {
   if (events.length === 0) {
     return (
       <div className="realtime-empty">
         <RadioTower size={20} />
-        <span>No ticks received for the active symbols.</span>
+        <span>{liveFeed.status === 'no_provider_configured' ? liveFeed.message : 'Waiting for live market ticks.'}</span>
       </div>
     );
   }
@@ -3397,6 +3611,22 @@ function discoverySummary(filters: InstrumentDiscoveryFilters, count: number) {
   return `${count} ${mode} matches across ${pieces.join(' / ')}`;
 }
 
+function discoveryEmptyMessage(liveFeed: LiveFeedSummary) {
+  if (liveFeed.status === 'no_provider_configured') {
+    return 'No catalog rows match because no live market provider is configured.';
+  }
+  if (liveFeed.status === 'awaiting_first_tick') {
+    return 'Catalog is configured, but the feed is still waiting for live market ticks.';
+  }
+  if (liveFeed.status === 'loading') {
+    return 'Loading feed configuration before showing catalog state.';
+  }
+  if (liveFeed.status === 'error') {
+    return `Catalog unavailable while feed status cannot be loaded: ${liveFeed.message}`;
+  }
+  return 'No matching instruments for the current filters.';
+}
+
 function assetTypeLabel(value: string) {
   if (value === 'corporate_bond') {
     return 'Corporate bond';
@@ -3406,6 +3636,9 @@ function assetTypeLabel(value: string) {
   }
   if (value === 'equity') {
     return 'Equity';
+  }
+  if (value === 'crypto') {
+    return 'Crypto';
   }
   return value || 'All assets';
 }
@@ -3428,6 +3661,23 @@ function formatMoneyValue(value: string | null | undefined, currency?: string | 
     ? numericValue.toLocaleString(undefined, { maximumFractionDigits: 2 })
     : value;
   return `${currency || ''} ${renderedValue}`.trim();
+}
+
+function formatSnapshotPrice(snapshot: RealtimeSymbolSnapshot) {
+  if (snapshot.price === null || !Number.isFinite(snapshot.price)) {
+    return '-';
+  }
+  const renderedValue = snapshot.price.toLocaleString(undefined, {
+    maximumFractionDigits: snapshot.price < 1 ? 6 : 2
+  });
+  return `${snapshot.currency || ''} ${renderedValue}`.trim();
+}
+
+function snapshotLabel(snapshot: RealtimeSymbolSnapshot | undefined) {
+  if (!snapshot || snapshot.price === null) {
+    return 'Awaiting tick';
+  }
+  return `${formatSnapshotPrice(snapshot)} · ${snapshot.lastTickAt ? formatTimestamp(snapshot.lastTickAt) : 'tick time pending'}`;
 }
 
 function formatRatio(value: string | null | undefined) {

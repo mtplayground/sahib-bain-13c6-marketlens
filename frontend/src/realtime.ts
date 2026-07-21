@@ -31,6 +31,30 @@ export type RealtimeTickEvent = {
   payload: unknown;
 };
 
+export type RealtimeMarketTickPayload = {
+  type: 'market.tick';
+  provider?: string;
+  provider_instrument_id?: string;
+  series_id?: number;
+  symbol?: string;
+  asset_class?: string;
+  price?: string | number;
+  currency?: string;
+  as_of?: string;
+  bid?: string | number | null;
+  ask?: string | number | null;
+};
+
+export type RealtimeSymbolSnapshot = {
+  symbol: string;
+  provider: string | null;
+  price: number | null;
+  currency: string | null;
+  change: number | null;
+  lastTickAt: string | null;
+  receivedAt: string | null;
+};
+
 export type RealtimeAlertEvent = {
   id: string;
   subscriptionId: string;
@@ -482,12 +506,82 @@ export function useRealtimeMarketData(symbols: string[]) {
 
   useEffect(() => () => client.destroy(), [client]);
 
+  const snapshots = useMemo(() => buildSymbolSnapshots(symbols, events), [events, symbols]);
+
   return {
     connection,
     events,
+    snapshots,
     alertEvents,
     reconnectNow: () => client.reconnectNow()
   };
+}
+
+function buildSymbolSnapshots(
+  symbols: string[],
+  events: RealtimeTickEvent[]
+): RealtimeSymbolSnapshot[] {
+  return symbols.map((symbol) => {
+    const symbolEvents = events.filter((event) => event.symbol === symbol);
+    const latest = symbolEvents[0] ?? null;
+    const previous = symbolEvents.find((event, index) => {
+      if (index === 0) {
+        return false;
+      }
+      const parsed = parseMarketTickPayload(event.payload);
+      return parsed?.price !== null && parsed?.price !== undefined;
+    }) ?? null;
+    const latestPayload = latest ? parseMarketTickPayload(latest.payload) : null;
+    const previousPayload = previous ? parseMarketTickPayload(previous.payload) : null;
+    const price = latestPayload?.price ?? null;
+    const previousPrice = previousPayload?.price ?? null;
+
+    return {
+      symbol,
+      provider: latestPayload?.provider ?? null,
+      price,
+      currency: latestPayload?.currency ?? null,
+      change:
+        price !== null && previousPrice !== null
+          ? price - previousPrice
+          : null,
+      lastTickAt: latestPayload?.asOf ?? null,
+      receivedAt: latest?.receivedAt ?? null
+    };
+  });
+}
+
+export function parseMarketTickPayload(payload: unknown): {
+  provider: string | null;
+  price: number | null;
+  currency: string | null;
+  asOf: string | null;
+} | null {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+  const record = payload as RealtimeMarketTickPayload;
+  if (record.type !== 'market.tick') {
+    return null;
+  }
+
+  return {
+    provider: typeof record.provider === 'string' ? record.provider : null,
+    price: parsePayloadNumber(record.price),
+    currency: typeof record.currency === 'string' ? record.currency : null,
+    asOf: typeof record.as_of === 'string' ? record.as_of : null
+  };
+}
+
+function parsePayloadNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
 }
 
 function parseServerMessage(rawData: unknown): ServerMessage | null {

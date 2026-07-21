@@ -1,6 +1,17 @@
 import { apiPath, type ApiProblem } from './session';
 
-export type AssetType = '' | 'equity' | 'corporate_bond' | 'government_bond';
+export type AssetType = '' | 'equity' | 'crypto' | 'corporate_bond' | 'government_bond';
+
+export type BackendConfigStatus = {
+  market_data_provider_key_configured: boolean;
+  market_data_provider_name: string;
+  market_data_provider_base_url_configured: boolean;
+  live_market_ingestion_enabled: boolean;
+  live_market_symbols: string[];
+  live_market_poll_interval_seconds: number;
+  live_market_provider_name: string;
+  live_market_provider_base_url_configured: boolean;
+};
 
 export type LatestPrice = {
   close_price: string;
@@ -486,6 +497,10 @@ export type InstrumentDiscoveryFilters = {
   maxPrice: string;
   limit?: number;
 };
+
+export async function loadConfigStatus(): Promise<BackendConfigStatus> {
+  return fetchJson<BackendConfigStatus>('/api/v1/config/status');
+}
 
 export async function searchInstruments(
   filters: InstrumentDiscoveryFilters
