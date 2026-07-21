@@ -127,6 +127,95 @@ export type TimeframeSeriesResponse = {
   points: TimeframePoint[];
 };
 
+export type CompanyFinancial = {
+  id: number;
+  instrument_id: number;
+  provider: string;
+  fiscal_period_end: string;
+  fiscal_period_type: string;
+  currency: string | null;
+  revenue: string | null;
+  gross_profit: string | null;
+  operating_income: string | null;
+  net_income: string | null;
+  ebitda: string | null;
+  eps_diluted: string | null;
+  total_assets: string | null;
+  total_liabilities: string | null;
+  shareholder_equity: string | null;
+  operating_cash_flow: string | null;
+  free_cash_flow: string | null;
+  source_updated_at: string | null;
+  fetched_at: string;
+  updated_at: string;
+};
+
+export type KeyRatios = {
+  id: number;
+  instrument_id: number;
+  provider: string;
+  as_of_date: string;
+  pe_ratio: string | null;
+  pb_ratio: string | null;
+  ps_ratio: string | null;
+  dividend_yield: string | null;
+  return_on_equity: string | null;
+  return_on_assets: string | null;
+  debt_to_equity: string | null;
+  current_ratio: string | null;
+  quick_ratio: string | null;
+  gross_margin: string | null;
+  operating_margin: string | null;
+  net_margin: string | null;
+  source_updated_at: string | null;
+  fetched_at: string;
+  updated_at: string;
+};
+
+export type CreditRating = {
+  id: number;
+  instrument_id: number;
+  provider: string;
+  agency: string;
+  rating_type: string;
+  rating: string;
+  outlook: string | null;
+  watch_status: string | null;
+  effective_at: string | null;
+  source_updated_at: string | null;
+  fetched_at: string;
+  updated_at: string;
+};
+
+export type BondYieldCurvePoint = {
+  id: number;
+  instrument_id: number;
+  provider: string;
+  curve_name: string;
+  region: string | null;
+  currency: string | null;
+  tenor_months: number;
+  yield_percent: string;
+  observed_at: string;
+  source_updated_at: string | null;
+  fetched_at: string;
+};
+
+export type FundamentalsResponse = {
+  query: {
+    instrument_id: number | null;
+    symbol: string | null;
+    provider: string | null;
+    limit: number;
+  };
+  instrument: InstrumentSummary;
+  latest_price: LatestPrice | null;
+  company_financials: CompanyFinancial[];
+  key_ratios: KeyRatios[];
+  credit_ratings: CreditRating[];
+  bond_yield_curve_points: BondYieldCurvePoint[];
+};
+
 export type TimeframeSeriesQuery = {
   symbol?: string;
   instrumentId?: number;
@@ -222,6 +311,17 @@ export async function loadTimeframeSeries(
   appendIfPresent(params, 'to', query.to ?? '');
 
   return fetchJson<TimeframeSeriesResponse>(`/api/v1/series/timeframe?${params.toString()}`);
+}
+
+export async function loadFundamentals(
+  instrumentId: number,
+  limit = 4
+): Promise<FundamentalsResponse> {
+  const params = new URLSearchParams();
+  params.set('instrument_id', String(instrumentId));
+  params.set('limit', String(limit));
+
+  return fetchJson<FundamentalsResponse>(`/api/v1/fundamentals?${params.toString()}`);
 }
 
 async function fetchJson<T>(path: string): Promise<T> {

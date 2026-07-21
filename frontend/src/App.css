@@ -968,6 +968,193 @@
   background: rgba(156, 255, 0, 0.035);
 }
 
+.fundamentals-panel {
+  display: grid;
+  gap: 1rem;
+}
+
+.fundamentals-panel.is-loading {
+  opacity: 0.72;
+}
+
+.fundamentals-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(12rem, 0.8fr) minmax(16rem, 1fr);
+  gap: 0.85rem;
+  align-items: stretch;
+}
+
+.fundamentals-summary__title,
+.fundamentals-price,
+.fundamentals-meta,
+.fundamentals-card {
+  min-width: 0;
+  border: 1px solid rgba(77, 238, 234, 0.18);
+  border-radius: var(--ml-radius);
+  background: rgba(7, 13, 8, 0.7);
+}
+
+.fundamentals-summary__title {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr);
+  gap: 0.7rem;
+  align-items: center;
+  padding: 0.85rem;
+  color: var(--ml-lime);
+}
+
+.fundamentals-summary__title strong,
+.fundamentals-summary__title span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fundamentals-summary__title strong {
+  font-size: 1.1rem;
+}
+
+.fundamentals-summary__title span {
+  margin-top: 0.2rem;
+  color: var(--ml-muted);
+}
+
+.fundamentals-price {
+  display: grid;
+  gap: 0.25rem;
+  align-content: center;
+  padding: 0.85rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.fundamentals-price span,
+.fundamentals-price small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ml-dim);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fundamentals-price strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ml-lime-soft);
+  font-size: 1.1rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fundamentals-meta {
+  display: grid;
+  padding: 0 0.85rem;
+}
+
+.fundamentals-meta .contract-item {
+  min-height: 2.6rem;
+}
+
+.fundamentals-data-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.85rem;
+}
+
+.fundamentals-card {
+  display: grid;
+  gap: 0.75rem;
+  align-content: start;
+  padding: 0.85rem;
+}
+
+.fundamentals-card__header {
+  display: grid;
+  grid-template-columns: 1.25rem minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  align-items: center;
+  color: var(--ml-cyan);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.fundamentals-card__header strong,
+.fundamentals-card__header span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fundamentals-card__header span {
+  color: var(--ml-dim);
+  font-size: 0.72rem;
+}
+
+.fundamentals-stat-grid,
+.fundamentals-list,
+.yield-curve-bars {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.fundamental-stat,
+.fundamentals-list-row,
+.yield-curve-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1fr);
+  gap: 0.55rem;
+  align-items: center;
+  min-height: 2.45rem;
+  padding: 0.5rem;
+  border: 1px solid rgba(156, 255, 0, 0.12);
+  border-radius: var(--ml-radius);
+  background: rgba(156, 255, 0, 0.035);
+}
+
+.fundamental-stat span,
+.fundamentals-list-row span,
+.yield-curve-bar span,
+.fundamentals-list-row small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ml-dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.68rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fundamental-stat strong,
+.fundamentals-list-row strong,
+.yield-curve-bar strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ml-lime);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fundamentals-list-row {
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 0.55fr) minmax(0, 0.8fr);
+}
+
+.fundamentals-list-row small {
+  text-align: right;
+}
+
+.fundamentals-empty {
+  display: grid;
+  min-height: 8rem;
+  place-items: center;
+  color: var(--ml-dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-align: center;
+}
+
 .instrument-picker {
   display: grid;
   gap: 0.85rem;
@@ -1532,6 +1719,8 @@
   .auth-grid,
   .discovery-grid,
   .instrument-picker__grid,
+  .fundamentals-summary,
+  .fundamentals-data-grid,
   .signal-stack,
   .overlay-chart-legend,
   .realtime-console__meta {
@@ -1572,6 +1761,8 @@
   .price-strip,
   .realtime-tape__row,
   .usage-row,
+  .fundamentals-list-row,
+  .yield-curve-bar,
   .overlay-chart-legend__row {
     grid-template-columns: 1fr 1fr;
   }

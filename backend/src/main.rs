@@ -58,6 +58,7 @@ fn app(state: AppState) -> Router {
         .nest(
             "/api/v1",
             routes::api_router()
+                .merge(fundamentals::router())
                 .merge(instrument_filter::router())
                 .merge(instrument_search::router())
                 .merge(popularity::router())
