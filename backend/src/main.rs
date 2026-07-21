@@ -11,6 +11,7 @@ mod instrument_filter;
 mod instrument_search;
 mod instruments;
 mod market_data;
+mod news;
 mod popularity;
 mod redis;
 mod routes;

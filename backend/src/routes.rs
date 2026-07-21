@@ -54,6 +54,9 @@ struct ConfigStatusResponse {
     market_data_provider_base_url_configured: bool,
     market_data_request_timeout_seconds: u64,
     news_provider_key_configured: bool,
+    news_provider_name: String,
+    news_provider_base_url_configured: bool,
+    news_provider_request_timeout_seconds: u64,
     auth_configured: bool,
     email_configured: bool,
     self_url_configured: bool,
@@ -86,6 +89,9 @@ async fn config_status(State(state): State<AppState>) -> Json<ConfigStatusRespon
         market_data_provider_base_url_configured: config.market_data_provider_base_url.is_some(),
         market_data_request_timeout_seconds: config.market_data_request_timeout_seconds,
         news_provider_key_configured: !config.news_provider_key.is_empty(),
+        news_provider_name: config.news_provider_name.clone(),
+        news_provider_base_url_configured: config.news_provider_base_url.is_some(),
+        news_provider_request_timeout_seconds: config.news_provider_request_timeout_seconds,
         auth_configured: !config.mctai_auth_url.is_empty()
             && !config.mctai_auth_app_token.is_empty()
             && !config.mctai_auth_jwks_url.is_empty(),

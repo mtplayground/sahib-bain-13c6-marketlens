@@ -17,6 +17,9 @@ pub struct AppConfig {
     pub market_data_provider_base_url: Option<String>,
     pub market_data_request_timeout_seconds: u64,
     pub news_provider_key: String,
+    pub news_provider_name: String,
+    pub news_provider_base_url: Option<String>,
+    pub news_provider_request_timeout_seconds: u64,
     pub mctai_auth_url: String,
     pub mctai_auth_app_token: String,
     pub mctai_auth_jwks_url: String,
@@ -74,6 +77,13 @@ impl AppConfig {
                 10,
             )?,
             news_provider_key: required_env("NEWS_PROVIDER_KEY")?,
+            news_provider_name: optional_env("NEWS_PROVIDER_NAME")?
+                .unwrap_or_else(|| "http-json-news".to_owned()),
+            news_provider_base_url: optional_env("NEWS_PROVIDER_BASE_URL")?,
+            news_provider_request_timeout_seconds: parse_optional_u64(
+                "NEWS_PROVIDER_REQUEST_TIMEOUT_SECONDS",
+                10,
+            )?,
             mctai_auth_url: required_env("MCTAI_AUTH_URL")?,
             mctai_auth_app_token: required_env("MCTAI_AUTH_APP_TOKEN")?,
             mctai_auth_jwks_url: required_env("MCTAI_AUTH_JWKS_URL")?,
