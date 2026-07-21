@@ -1,3 +1,4 @@
+mod analytics;
 mod auth;
 mod config;
 mod db;
