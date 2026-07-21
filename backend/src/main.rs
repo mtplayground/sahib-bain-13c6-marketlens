@@ -1,4 +1,5 @@
 mod analytics;
+mod alerts;
 mod auth;
 mod config;
 mod db;
@@ -53,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn app(state: AppState) -> Router {
     let protected_auth = auth::protected_router()
+        .merge(alerts::router())
         .merge(view_history::router())
         .merge(watchlists::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_auth));
