@@ -3,6 +3,7 @@ mod config;
 mod db;
 mod email;
 mod ingestion;
+mod instrument_filter;
 mod instrument_search;
 mod instruments;
 mod market_data;
@@ -52,6 +53,7 @@ fn app(state: AppState) -> Router {
         .nest(
             "/api/v1",
             routes::api_router()
+                .merge(instrument_filter::router())
                 .merge(instrument_search::router())
                 .merge(auth::public_router())
                 .merge(protected_auth),
