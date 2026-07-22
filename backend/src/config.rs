@@ -125,7 +125,7 @@ impl AppConfig {
             )?,
             live_market_provider_name,
             live_market_provider_base_url,
-            news_provider_key: required_env("NEWS_PROVIDER_KEY")?,
+            news_provider_key: optional_env("NEWS_PROVIDER_KEY")?.unwrap_or_default(),
             news_provider_name: optional_env("NEWS_PROVIDER_NAME")?
                 .unwrap_or_else(|| "http-json-news".to_owned()),
             news_provider_base_url: optional_env("NEWS_PROVIDER_BASE_URL")?,
